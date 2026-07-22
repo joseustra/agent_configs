@@ -8,8 +8,8 @@ modelRoles:
   slow: anthropic/claude-opus-4-8
   task: anthropic/claude-sonnet-4-6
   smol: anthropic/claude-haiku-4-5
-skills:
-  enabled: false
+# skills:
+#   enabled: false
 disabledProviders:
   - gemini
   - github
