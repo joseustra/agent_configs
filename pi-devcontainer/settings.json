@@ -1,0 +1,13 @@
+{
+  "defaultModel": "gemma4",
+  "defaultProvider": "ollama",
+  "lastChangelogVersion": "0.75.3",
+  "hideThinkingBlock": false,
+  "defaultThinkingLevel": "high",
+  "skills": [
+    "~/.claude/skills"
+  ],
+  "packages": [
+    "npm:context-mode"
+  ]
+}

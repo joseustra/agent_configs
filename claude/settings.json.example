@@ -1,0 +1,42 @@
+{
+  "model": "claude-fable-5",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.claude/hooks/context-mode-cache-heal.mjs\""
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "$HOME/.claude/statusline.mjs"
+  },
+  "enabledPlugins": {
+    "context-mode@context-mode": true,
+    "swift-lsp@claude-plugins-official": true,
+    "gopls-lsp@claude-plugins-official": true,
+    "elixir-phoenix@oliver-kriska": true,
+    "rust-analyzer-lsp@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {
+    "context-mode": {
+      "source": {
+        "source": "github",
+        "repo": "mksglu/context-mode"
+      }
+    },
+    "oliver-kriska": {
+      "source": {
+        "source": "github",
+        "repo": "oliver-kriska/claude-elixir-phoenix"
+      }
+    }
+  },
+  "tui": "fullscreen",
+  "theme": "auto"
+}

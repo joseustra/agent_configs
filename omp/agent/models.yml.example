@@ -1,0 +1,26 @@
+# omp (oh-my-pi) model + provider config for the HOST. omp reads ~/.omp/agent/models.yml.
+# Per-host (points at local servers + holds a key), so it's not committed — copy this to
+# ~/.omp/agent/models.yml and fill in. `make install` seeds it for you.
+# apiKey: local ollama/MLX servers accept any non-empty value.
+providers:
+  ollama:
+    baseUrl: http://127.0.0.1:11434/v1
+    apiKey: REPLACE_ME
+    api: openai-completions
+    models:
+      - id: gemma4
+        name: Gemma 4 (Ollama)
+        reasoning: true
+        input: [text, image]
+        contextWindow: 131072
+
+  omlx:
+    baseUrl: http://127.0.0.1:8000/v1
+    apiKey: REPLACE_ME
+    api: openai-completions
+    models:
+      - id: gemma-4-e4b-it-4bit
+        name: Gemma 4 E4B IT (4bit)
+        reasoning: true
+        input: [text, image]
+        contextWindow: 131072

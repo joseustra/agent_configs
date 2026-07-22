@@ -1,0 +1,19 @@
+# ── secrets & per-host files — NEVER commit. Templates use the .example suffix. ──
+**/auth.json
+**/models.json
+**/models.yml
+**/.env
+**/*.key
+**/*.pem
+**/.credentials.json
+*.local
+
+# OS / editor / backup cruft
+.DS_Store
+*.bak
+
+# templates ARE tracked (re-include after the broad ignores above)
+!**/*.example
+
+# claude settings drift per machine; only the .example template is tracked
+claude/settings.json

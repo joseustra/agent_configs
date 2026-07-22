@@ -1,0 +1,34 @@
+# agent_configs manifest — the map `make install` follows.
+#
+# Columns:  TYPE  SRC(repo-relative)  DST(under $HOME)  [MODE]
+#   link  symlink DST -> SRC. Single source of truth; edits go live everywhere.
+#         An existing real file at DST is moved to DST.bak once, then replaced.
+#   linkkids  DST is a REAL directory; each child of SRC is symlinked into it.
+#         Machine-local extras (skills, commands) live in DST as plain files/dirs
+#         alongside the links and are never touched. Links whose repo source
+#         disappeared are pruned on install.
+#   seed  copy SRC -> DST only if DST is absent (never overwrites). For per-host
+#         and secret files. MODE (e.g. 600) is applied after copying.
+#
+# Whitespace-separated. '#' comments and blank lines are ignored.
+
+# ── shared config (symlinked) ──────────────────────────────────────────────────
+link  claude/CLAUDE.md                            .claude/CLAUDE.md
+link  claude/statusline.mjs                       .claude/statusline.mjs
+linkkids  claude/skills                           .claude/skills
+linkkids  claude/agents                           .claude/agents
+linkkids  claude/commands                         .claude/commands
+link  omp/agent/config.yml                        .omp/agent/config.yml
+link  omp/agent/extensions/omp-danger-guard.ts    .omp/agent/extensions/omp-danger-guard.ts
+link  omp/agent/commands                          .omp/agent/commands
+linkkids  omp/agent/agents                          .omp/agent/agents
+link  opencode/opencode.json                      .config/opencode/opencode.json
+link  pi-devcontainer/settings.json               .pi-devcontainer/settings.json
+
+# ── per-host / secret (seeded from template, never committed) ───────────────────
+# settings.json drifts per machine (model, plugins, effort) — seed once, own locally.
+seed  claude/settings.json.example                .claude/settings.json               644
+seed  omp/agent/.env.example                      .omp/agent/.env                     600
+seed  omp/agent/models.yml.example                .omp/agent/models.yml               644
+seed  pi-devcontainer/models.json.example         .pi-devcontainer/models.json        600
+seed  pi-devcontainer/models.yml.example          .pi-devcontainer/models.yml         644

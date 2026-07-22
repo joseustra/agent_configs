@@ -1,0 +1,40 @@
+# omp (oh-my-pi) model + provider config for the CONTAINER — mirrors the per-host Pi
+# config in ~/.pi-devcontainer/models.json. The devcontainer Makefile bind-mounts the
+# real file into the container at /home/dev/.omp/agent/models.yml.
+#
+# Local providers point at host.internal (the macOS host as seen from inside the
+# container), not 127.0.0.1, so this stays per-host (not committed). Copy to
+# ~/.pi-devcontainer/models.yml and fill in. `make install` seeds it for you.
+# apiKey: local ollama/MLX servers accept any non-empty value.
+providers:
+  ollama:
+    baseUrl: http://host.internal:11434/v1
+    apiKey: REPLACE_ME
+    api: openai-completions
+    models:
+      - id: gemma4
+        name: Gemma 4 (Ollama)
+        reasoning: true
+        input: [text, image]
+        contextWindow: 131072
+
+  omlx:
+    baseUrl: http://host.internal:8000/v1
+    apiKey: REPLACE_ME
+    api: openai-completions
+    models:
+      - id: gpt-oss-20b-MXFP4-Q8
+        name: GPT-OSS 20B (MXFP4 Q8)
+        reasoning: true
+        input: [text, image]
+        contextWindow: 131072
+      - id: gemma-4-e4b-it-OptiQ-4bit
+        name: Gemma 4 E4B IT (OptiQ 4bit)
+        reasoning: true
+        input: [text, image]
+        contextWindow: 131072
+      - id: Qwen2.5-Coder-14B-Instruct-MLX-4bit
+        name: Qwen2.5 Coder 14B Instruct (MLX 4bit)
+        reasoning: true
+        input: [text, image]
+        contextWindow: 131072

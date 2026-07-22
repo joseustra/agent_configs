@@ -1,0 +1,22 @@
+{
+  "providers": {
+    "ollama": {
+      "api": "openai-completions",
+      "apiKey": "REPLACE_ME__local_servers_accept_any_nonempty_value",
+      "baseUrl": "http://host.internal:11434/v1",
+      "models": [
+        { "_launch": false, "id": "gemma4", "contextWindow": 131072, "input": ["text", "image"], "reasoning": true }
+      ]
+    },
+    "omlx": {
+      "api": "openai-completions",
+      "apiKey": "REPLACE_ME__local_servers_accept_any_nonempty_value",
+      "baseUrl": "http://host.internal:8000/v1",
+      "models": [
+        { "_launch": true, "id": "gpt-oss-20b-MXFP4-Q8", "contextWindow": 131072, "input": ["text", "image"], "reasoning": true },
+        { "_launch": true, "id": "gemma-4-e4b-it-OptiQ-4bit", "contextWindow": 131072, "input": ["text", "image"], "reasoning": true },
+        { "_launch": true, "id": "Qwen2.5-Coder-14B-Instruct-MLX-4bit", "contextWindow": 131072, "input": ["text", "image"], "reasoning": true }
+      ]
+    }
+  }
+}

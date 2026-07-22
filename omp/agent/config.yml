@@ -1,0 +1,12 @@
+tools: 
+  approvalMode: yolo
+setupVersion: 1
+modelRoles: 
+  default: anthropic/claude-opus-4-8
+  plan: anthropic/claude-opus-4-8
+  slow: anthropic/claude-opus-4-8
+  task: anthropic/claude-sonnet-4-6
+  smol: anthropic/claude-haiku-4-5
+theme: 
+  light: light
+  dark: titanium
