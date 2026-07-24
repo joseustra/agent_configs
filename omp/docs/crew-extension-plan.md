@@ -99,8 +99,33 @@ a role supplies system prompt + model, defaults the agent name (`review`,
 (writes `docs/research/`, never edits code), implement (builds + verifies),
 review (writes `REVIEW.md`, never edits code).
 
+### Follow-up messaging (added 2026-07-24)
+
+Crew agents are fully interactive, not fire-and-forget. `runSubprocess` keeps the
+worker's `AgentSession` registered after it finishes (`keepAlive` defaults to
+true), so "done" really means idle-and-revivable. In the overlay, `Enter` always
+opens the detail pane and `m` (list or detail) composes a message:
+
+- **running** → the live session is fetched from the global `AgentRegistry` and
+  the text is queued via `session.prompt(text, { streamingBehavior: "followUp" })`
+  (consumed after the current work; non-interrupting).
+- **idle (done/failed)** → `runSubagentFollowUpTurn({ id, agent, message })`
+  revives the session and runs a full monitored turn with the text as the user
+  prompt, retaining all history. Completion is tracked exactly like the initial
+  run (same `trackRun` bookkeeping).
+- **stale** (previous omp run) → in-memory session is gone; read-only, `o` opens
+  the transcript.
+
+Import caveat (compiled binary): extensions can only resolve the package root
+plus *declared* subpath exports — the `./*` catch-all is NOT expanded into the
+bundled virtual modules (`scripts/legacy-pi-virtual-module.ts`: "root
+catch-alls stay out"). `./registry/*` and `./irc/*` are not declared, so
+`AgentRegistry` is reached indirectly via the declared `./modes/*` helper
+`getRunningSubagentBadgeRegistry(undefined)` → `AgentRegistry.global()`.
+`runSubagentFollowUpTurn` is a root-barrel export.
+
 ### Future ideas
 
 - Worktree isolation per agent (omp has `task/worktree.ts` internally).
-- Send follow-up messages to running agents.
+- Steer (interrupting) vs follow-up (queued) choice when messaging a busy agent.
 - Auto-chain (start review when implementation completes).

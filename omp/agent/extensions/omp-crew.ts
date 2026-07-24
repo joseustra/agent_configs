@@ -39,7 +39,13 @@ import type {
 	ModelRegistry,
 	SingleResult,
 } from "@oh-my-pi/pi-coding-agent";
-import { getAgentDir, runSubprocess } from "@oh-my-pi/pi-coding-agent";
+import { getAgentDir, runSubagentFollowUpTurn, runSubprocess } from "@oh-my-pi/pi-coding-agent";
+// AgentRegistry itself has no bundled export in the compiled binary (only root +
+// declared subpath exports resolve from extensions; ./registry/* is not one).
+// This ./modes/* helper returns AgentRegistry.global() when passed undefined.
+import { getRunningSubagentBadgeRegistry } from "@oh-my-pi/pi-coding-agent/modes/running-subagent-badge";
+
+const agentRegistry = () => getRunningSubagentBadgeRegistry(undefined);
 import { type Component, matchesKey, replaceTabs, truncateToWidth, type TUI } from "@oh-my-pi/pi-tui";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 
@@ -62,6 +68,9 @@ interface CrewAgent {
 	abort?: AbortController;
 	progress?: AgentProgress;
 	result?: SingleResult;
+	// Needed to revive the worker for follow-up turns; gone after an omp restart,
+	// which is what makes "stale" agents read-only.
+	agentDef?: AgentDefinition;
 }
 
 // ── Module state ─────────────────────────────────────────────────────────────
@@ -258,9 +267,11 @@ function spawnAgent(pi: ExtensionAPI, name: string, task: string, model?: string
 		source: "project" as AgentSource,
 	};
 
-	void fs
-		.mkdir(sessionsDir(), { recursive: true })
-		.then(() =>
+	agent.agentDef = agentDef;
+
+	trackRun(
+		agent,
+		fs.mkdir(sessionsDir(), { recursive: true }).then(() =>
 			runSubprocess({
 				cwd,
 				agent: agentDef,
@@ -269,24 +280,36 @@ function spawnAgent(pi: ExtensionAPI, name: string, task: string, model?: string
 				id,
 				modelOverride: model,
 				signal: abort.signal,
-				onProgress: p => {
-					agent.progress = p;
-					updateWidget();
-					overlayRefresh?.();
-				},
+				onProgress: progressHandler(agent),
 				modelRegistry,
 				settings: pi.pi.settings,
 				enableLsp: false,
 				artifactsDir: sessionsDir(),
 			}),
-		)
+		),
+	);
+
+	return agent;
+}
+
+function progressHandler(agent: CrewAgent): (p: AgentProgress) => void {
+	return p => {
+		agent.progress = p;
+		updateWidget();
+		overlayRefresh?.();
+	};
+}
+
+/** Shared end-of-turn bookkeeping for the initial run and follow-up turns. */
+function trackRun(agent: CrewAgent, run: Promise<SingleResult>): void {
+	run
 		.then(result => {
 			agent.result = result;
 			agent.error = result.error;
 			agent.status = result.aborted ? "aborted" : result.exitCode === 0 ? "done" : "failed";
 		})
 		.catch(err => {
-			agent.status = abort.signal.aborted ? "aborted" : "failed";
+			agent.status = agent.abort?.signal.aborted ? "aborted" : "failed";
 			agent.error = err instanceof Error ? err.message : String(err);
 		})
 		.finally(() => {
@@ -299,13 +322,56 @@ function spawnAgent(pi: ExtensionAPI, name: string, task: string, model?: string
 				agent.status === "done" ? "info" : agent.status === "aborted" ? "warning" : "error",
 			);
 		});
+}
 
-	return agent;
+// ── Messaging ────────────────────────────────────────────────────────────────
+// Workers keep their AgentSession alive after finishing (runSubprocess keepAlive
+// defaults to true), so "done" really means idle-and-revivable:
+//   running → queue the text on the live session (consumed after current work)
+//   idle    → runSubagentFollowUpTurn revives it and runs a turn with the text
+//   stale   → previous omp run; the in-memory session is gone → read-only
+
+function messageAgent(agent: CrewAgent, text: string): string {
+	if (agent.status === "stale" || !agent.agentDef) {
+		return `crew: ${agent.name} is from a previous omp run — open its transcript instead (o)`;
+	}
+	if (agent.status === "running") {
+		const session = agentRegistry().get(agent.id)?.session;
+		if (!session) return `crew: ${agent.name} is not addressable yet — try again in a moment`;
+		void session.prompt(text, { streamingBehavior: "followUp" });
+		return `crew: message queued for ${agent.name} (picked up after its current work)`;
+	}
+	if (!agentRegistry().get(agent.id)) {
+		return `crew: ${agent.name}'s session is no longer alive — open its transcript instead (o)`;
+	}
+	agent.status = "running";
+	agent.endedAt = undefined;
+	agent.error = undefined;
+	void saveState();
+	updateWidget();
+	// Fresh controller per revival so a previous kill doesn't poison this turn.
+	agent.abort = new AbortController();
+	trackRun(
+		agent,
+		runSubagentFollowUpTurn({
+			id: agent.id,
+			agent: agent.agentDef,
+			message: text,
+			signal: agent.abort.signal,
+			onProgress: progressHandler(agent),
+		}),
+	);
+	return `crew: ${agent.name} woken with your message`;
 }
 
 // ── Overlay view ─────────────────────────────────────────────────────────────
 
-type OverlayAction = { type: "open"; id: string } | { type: "rename"; id: string } | { type: "kill"; id: string } | { type: "new" };
+type OverlayAction =
+	| { type: "open"; id: string }
+	| { type: "message"; id: string }
+	| { type: "rename"; id: string }
+	| { type: "kill"; id: string }
+	| { type: "new" };
 
 class CrewOverlay implements Component {
 	#selected = 0;
@@ -331,13 +397,14 @@ class CrewOverlay implements Component {
 		const current = agents[this.#selected];
 
 		if (this.#detailId) {
-			// Detail pane: Esc/← back; Enter opens the session once the agent finished.
+			// Detail pane: m message the agent, o open the raw transcript, Esc/← back.
 			if (matchesKey(data, "escape") || matchesKey(data, "left")) {
 				this.#detailId = null;
 				this.tui.requestRender();
-			} else if (matchesKey(data, "enter") || matchesKey(data, "return")) {
-				const a = roster.get(this.#detailId);
-				if (a && a.status !== "running") this.done({ type: "open", id: a.id });
+			} else if (data === "m") {
+				this.done({ type: "message", id: this.#detailId });
+			} else if (data === "o") {
+				this.done({ type: "open", id: this.#detailId });
 			}
 			return;
 		}
@@ -352,12 +419,10 @@ class CrewOverlay implements Component {
 			this.tui.requestRender();
 		} else if (matchesKey(data, "enter") || matchesKey(data, "return") || matchesKey(data, "right")) {
 			if (!current) return;
-			if (current.status === "running") {
-				this.#detailId = current.id;
-				this.tui.requestRender();
-			} else {
-				this.done({ type: "open", id: current.id });
-			}
+			this.#detailId = current.id;
+			this.tui.requestRender();
+		} else if (data === "m") {
+			if (current) this.done({ type: "message", id: current.id });
 		} else if (data === "n") {
 			this.done({ type: "new" });
 		} else if (matchesKey(data, "ctrl+r")) {
@@ -387,7 +452,7 @@ class CrewOverlay implements Component {
 			lines.push(` ${cursor} ${statusIcon(a)} ${a.name.padEnd(nameWidth)}  ${agentSummary(a)}`);
 		});
 		lines.push("");
-		lines.push(` ${ANSI.dim}↑↓/jk select · Enter/→ open · n new · ^R rename · ^X kill · Esc close${ANSI.reset}`);
+		lines.push(` ${ANSI.dim}↑↓/jk select · Enter/→ open · m message · n new · ^R rename · ^X kill · Esc close${ANSI.reset}`);
 		return lines;
 	}
 
@@ -410,9 +475,7 @@ class CrewOverlay implements Component {
 		if (tail.length === 0) lines.push(` ${ANSI.dim}(no output yet)${ANSI.reset}`);
 		for (const out of tail) lines.push(` ${out}`);
 		lines.push("");
-		lines.push(
-			` ${ANSI.dim}Esc/← back${a.status !== "running" ? " · Enter open session" : ""}${ANSI.reset}`,
-		);
+		lines.push(` ${ANSI.dim}m message · o open transcript · Esc/← back${ANSI.reset}`);
 		return lines;
 	}
 }
@@ -485,6 +548,11 @@ async function showCrewView(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pro
 		if (!agent) continue;
 
 		switch (action.type) {
+			case "message": {
+				const text = (await ctx.ui.editor(`crew: message to "${agent.name}"`))?.trim();
+				if (text) ctx.ui.notify(messageAgent(agent, text), "info");
+				continue;
+			}
 			case "open": {
 				try {
 					await fs.access(agent.sessionFile);

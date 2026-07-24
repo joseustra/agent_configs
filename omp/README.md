@@ -38,10 +38,14 @@ providers, theme.
   mode; blocks (fail-closed) when there's no UI to ask. Tune by
   commenting/adding rules in the file.
 - **`omp-crew.ts`** — per-project agents view (the "crew"). Spawn named agents
-  that run in-process with full tool access, watch them, enter them:
-  - **Ctrl+A** or `/crew` — roster overlay: `↑↓/jk` select, `Enter/→` open
-    (running → live detail pane; finished → switch into its session),
-    `n` new agent, `Ctrl+R` rename, `Ctrl+X` kill/remove, `Esc` close.
+  that run in-process with full tool access, watch them, talk to them:
+  - **Ctrl+A** or `/crew` — roster overlay: `↑↓/jk` select, `Enter/→` open the
+    detail pane (live output, tokens/cost), `m` message the agent, `n` new
+    agent, `Ctrl+R` rename, `Ctrl+X` kill/remove, `Esc` close.
+  - Detail pane: `m` message, `o` open the raw transcript, `Esc/←` back.
+    Messages are queued if the agent is busy, or wake it for a new turn (full
+    history retained) if it's idle. Agents from a previous omp run are
+    read-only ("stale").
   - `/crew new` — role picker → name → task. `/crew status` — quick summary.
   - State in `<project>/.crew/` (self-gitignoring; also in `~/.gitignore`):
     `crew.json` roster + `sessions/<id>.jsonl` transcripts.
