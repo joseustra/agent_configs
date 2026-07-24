@@ -124,6 +124,24 @@ catch-alls stay out"). `./registry/*` and `./irc/*` are not declared, so
 `getRunningSubagentBadgeRegistry(undefined)` → `AgentRegistry.global()`.
 `runSubagentFollowUpTurn` is a root-barrel export.
 
+### Nested spawns / orchestrator workflow (added 2026-07-24)
+
+Crew agents can spawn their own subagents via omp's task tool, enabling an
+orchestrator pattern (one crew agent fans work out to children). Two pieces:
+
+- `AgentDefinition.spawns: "*"` on every crew worker. Without it,
+  `spawnsEnv` resolves to `""` and `resolveSpawnPolicy` disables the task tool
+  ("Cannot spawn … spawns disabled for this agent" — confirmed live).
+  Recursion depth is still capped by omp's `task.maxRecursionDepth` (default 2).
+- The overlay mirrors those children: nested spawns register in the global
+  `AgentRegistry` with `parentId` = the spawning agent's id
+  (`structured-subagent.ts:430`), so the list view renders a `└`-indented
+  subtree under each crew agent (status + activity gist from the registry).
+  `Enter` on a child opens its transcript (`ref.sessionFile`), `m` queues a
+  message on its live session; rename/kill stay crew-only (children are owned
+  by their parent's task call). A 1 s repaint timer keeps child rows live —
+  their progress otherwise only surfaces through the parent's `onProgress`.
+
 ### Future ideas
 
 - Worktree isolation per agent (omp has `task/worktree.ts` internally).

@@ -46,6 +46,10 @@ providers, theme.
     Messages are queued if the agent is busy, or wake it for a new turn (full
     history retained) if it's idle. Agents from a previous omp run are
     read-only ("stale").
+  - Crew agents can spawn their own subagents (task tool enabled via
+    `spawns: "*"`), so an orchestrator agent can fan work out. Children show
+    `└`-nested under their parent in the roster: `Enter` opens their
+    transcript, `m` messages them; they're killed via their parent.
   - `/crew new` — role picker → name → task. `/crew status` — quick summary.
   - State in `<project>/.crew/` (self-gitignoring; also in `~/.gitignore`):
     `crew.json` roster + `sessions/<id>.jsonl` transcripts.

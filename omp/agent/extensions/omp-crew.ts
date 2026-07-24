@@ -46,6 +46,22 @@ import { getAgentDir, runSubagentFollowUpTurn, runSubprocess } from "@oh-my-pi/p
 import { getRunningSubagentBadgeRegistry } from "@oh-my-pi/pi-coding-agent/modes/running-subagent-badge";
 
 const agentRegistry = () => getRunningSubagentBadgeRegistry(undefined);
+
+// Registry entry type, inferred from the badge helper because ./registry/* is
+// not a declared subpath export in the compiled binary.
+type RegistryRef = ReturnType<ReturnType<typeof agentRegistry>["list"]>[number];
+
+/**
+ * Task-tool subagents spawned by a crew worker (spawns: "*"), depth-first with
+ * indentation depth. These live in omp's global registry with parentId set to
+ * the spawning agent, so the crew view can mirror them under their parent.
+ */
+function childTree(parentId: string, refs: RegistryRef[], depth = 1): { ref: RegistryRef; depth: number }[] {
+	return refs
+		.filter(r => r.parentId === parentId)
+		.sort((a, b) => a.createdAt - b.createdAt)
+		.flatMap(r => [{ ref: r, depth }, ...childTree(r.id, refs, depth + 1)]);
+}
 import { type Component, matchesKey, replaceTabs, truncateToWidth, type TUI } from "@oh-my-pi/pi-tui";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 
@@ -265,6 +281,10 @@ function spawnAgent(pi: ExtensionAPI, name: string, task: string, model?: string
 		description: role?.description ?? `crew agent: ${name}`,
 		systemPrompt: role?.systemPrompt ?? buildSystemPrompt(name),
 		source: "project" as AgentSource,
+		// Without this, workers get "spawns disabled" and can't use the task tool.
+		// "*" lets an orchestrator-style crew agent fan out its own subagents;
+		// they appear in the crew view nested under their parent.
+		spawns: "*",
 	};
 
 	agent.agentDef = agentDef;
@@ -371,30 +391,45 @@ type OverlayAction =
 	| { type: "message"; id: string }
 	| { type: "rename"; id: string }
 	| { type: "kill"; id: string }
+	| { type: "open-child"; id: string }
+	| { type: "message-child"; id: string }
 	| { type: "new" };
+
+type OverlayRow = { kind: "crew"; agent: CrewAgent } | { kind: "child"; ref: RegistryRef; depth: number };
 
 class CrewOverlay implements Component {
 	#selected = 0;
 	#detailId: string | null = null;
+	// Child agents report through their parent's onProgress only while the parent
+	// is inside the task call; a coarse tick keeps their rows and ages live.
+	#timer: ReturnType<typeof setInterval>;
 
 	constructor(
 		private tui: TUI,
 		private done: (action: OverlayAction | undefined) => void,
 	) {
 		overlayRefresh = () => this.tui.requestRender();
+		this.#timer = setInterval(() => this.tui.requestRender(), 1000);
 	}
 
 	dispose(): void {
+		clearInterval(this.#timer);
 		overlayRefresh = null;
 	}
 
-	#agents(): CrewAgent[] {
-		return [...roster.values()].sort((a, b) => b.startedAt - a.startedAt);
+	#rows(): OverlayRow[] {
+		const refs = agentRegistry().list();
+		return [...roster.values()]
+			.sort((a, b) => b.startedAt - a.startedAt)
+			.flatMap(a => [
+				{ kind: "crew", agent: a } as OverlayRow,
+				...childTree(a.id, refs).map(c => ({ kind: "child", ...c }) as OverlayRow),
+			]);
 	}
 
 	handleInput(data: string): void {
-		const agents = this.#agents();
-		const current = agents[this.#selected];
+		const rows = this.#rows();
+		const current = rows[this.#selected];
 
 		if (this.#detailId) {
 			// Detail pane: m message the agent, o open the raw transcript, Esc/← back.
@@ -415,20 +450,29 @@ class CrewOverlay implements Component {
 			this.#selected = Math.max(0, this.#selected - 1);
 			this.tui.requestRender();
 		} else if (matchesKey(data, "down") || data === "j") {
-			this.#selected = Math.min(Math.max(0, agents.length - 1), this.#selected + 1);
+			this.#selected = Math.min(Math.max(0, rows.length - 1), this.#selected + 1);
 			this.tui.requestRender();
 		} else if (matchesKey(data, "enter") || matchesKey(data, "return") || matchesKey(data, "right")) {
 			if (!current) return;
-			this.#detailId = current.id;
+			if (current.kind === "child") {
+				this.done({ type: "open-child", id: current.ref.id });
+				return;
+			}
+			this.#detailId = current.agent.id;
 			this.tui.requestRender();
 		} else if (data === "m") {
-			if (current) this.done({ type: "message", id: current.id });
+			if (!current) return;
+			this.done(
+				current.kind === "child"
+					? { type: "message-child", id: current.ref.id }
+					: { type: "message", id: current.agent.id },
+			);
 		} else if (data === "n") {
 			this.done({ type: "new" });
 		} else if (matchesKey(data, "ctrl+r")) {
-			if (current) this.done({ type: "rename", id: current.id });
+			if (current?.kind === "crew") this.done({ type: "rename", id: current.agent.id });
 		} else if (matchesKey(data, "ctrl+x")) {
-			if (current) this.done({ type: "kill", id: current.id });
+			if (current?.kind === "crew") this.done({ type: "kill", id: current.agent.id });
 		}
 	}
 
@@ -438,18 +482,32 @@ class CrewOverlay implements Component {
 	}
 
 	#renderList(): string[] {
-		const agents = this.#agents();
-		if (this.#selected >= agents.length) this.#selected = Math.max(0, agents.length - 1);
+		const rows = this.#rows();
+		if (this.#selected >= rows.length) this.#selected = Math.max(0, rows.length - 1);
+		const crewCount = rows.filter(r => r.kind === "crew").length;
 		const lines: string[] = [];
-		lines.push(`${ANSI.bold} crew — ${path.basename(cwd)}${ANSI.reset}  ${ANSI.dim}${agents.length} agent(s)${ANSI.reset}`);
+		lines.push(`${ANSI.bold} crew — ${path.basename(cwd)}${ANSI.reset}  ${ANSI.dim}${crewCount} agent(s)${ANSI.reset}`);
 		lines.push("");
-		if (agents.length === 0) {
+		if (rows.length === 0) {
 			lines.push(`   ${ANSI.dim}no agents yet — press n to create one${ANSI.reset}`);
 		}
-		const nameWidth = Math.max(8, ...agents.map(a => a.name.length));
-		agents.forEach((a, i) => {
+		const nameWidth = Math.max(8, ...rows.map(r => (r.kind === "crew" ? r.agent.name.length : 0)));
+		rows.forEach((r, i) => {
 			const cursor = i === this.#selected ? `${ANSI.cyan}▸${ANSI.reset}` : " ";
-			lines.push(` ${cursor} ${statusIcon(a)} ${a.name.padEnd(nameWidth)}  ${agentSummary(a)}`);
+			if (r.kind === "crew") {
+				lines.push(` ${cursor} ${statusIcon(r.agent)} ${r.agent.name.padEnd(nameWidth)}  ${agentSummary(r.agent)}`);
+			} else {
+				const icon =
+					r.ref.status === "running"
+						? `${ANSI.yellow}◐${ANSI.reset}`
+						: r.ref.status === "idle"
+							? `${ANSI.green}●${ANSI.reset}`
+							: `${ANSI.dim}○${ANSI.reset}`;
+				const doing = r.ref.activity ? ` · ${r.ref.activity}` : "";
+				lines.push(
+					` ${cursor} ${"  ".repeat(r.depth)}└ ${icon} ${r.ref.displayName}  ${ANSI.dim}${r.ref.status}${doing}${ANSI.reset}`,
+				);
+			}
 		});
 		lines.push("");
 		lines.push(` ${ANSI.dim}↑↓/jk select · Enter/→ open · m message · n new · ^R rename · ^X kill · Esc close${ANSI.reset}`);
@@ -541,6 +599,31 @@ async function showCrewView(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pro
 
 		if (action.type === "new") {
 			await newAgentFlow(pi, ctx);
+			continue;
+		}
+
+		// Nested subagents (spawned by a crew worker's task tool) are registry
+		// entries, not roster entries: open their transcript or message them.
+		if (action.type === "open-child" || action.type === "message-child") {
+			const ref = agentRegistry().get(action.id);
+			if (!ref) continue;
+			if (action.type === "message-child") {
+				const text = (await ctx.ui.editor(`crew: message to "${ref.displayName}"`))?.trim();
+				if (!text) continue;
+				if (ref.session) {
+					void ref.session.prompt(text, { streamingBehavior: "followUp" });
+					ctx.ui.notify(`crew: message queued for ${ref.displayName}`, "info");
+				} else {
+					ctx.ui.notify(`crew: ${ref.displayName} is parked — open its transcript instead`, "warning");
+				}
+				continue;
+			}
+			if (!ref.sessionFile) {
+				ctx.ui.notify(`crew: no session file for ${ref.displayName}`, "error");
+				continue;
+			}
+			const res = await ctx.switchSession(ref.sessionFile);
+			if (!res.cancelled) return;
 			continue;
 		}
 
