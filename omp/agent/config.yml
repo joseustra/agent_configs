@@ -1,20 +1,18 @@
-tools:
+tools: 
   approvalMode: yolo
   discoveryMode: all
 setupVersion: 1
-modelRoles:
-  default: anthropic/claude-opus-4-8
+modelRoles: 
   plan: anthropic/claude-opus-4-8
   slow: anthropic/claude-opus-4-8
   task: anthropic/claude-sonnet-4-6
   smol: anthropic/claude-haiku-4-5
-# skills:
-#   enabled: false
-disabledProviders:
+  default: anthropic/claude-opus-4-8:medium
+disabledProviders: 
   - gemini
   - github
   - opencode
   - cursor
-theme:
+theme: 
   light: light
   dark: titanium
