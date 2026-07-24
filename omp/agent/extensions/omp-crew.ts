@@ -183,6 +183,19 @@ function agentSummary(a: CrewAgent): string {
 	return `${a.status} ${agentAge(a)}${stats}${err}`;
 }
 
+// omp mounts extension overlays with `width: "100%", maxHeight: "100%"` anchored
+// bottom-center (extension-ui-controller.showHookCustom), so the view is as tall
+// as the lines we return — pad to the terminal height to claim the whole screen.
+function viewportHeight(): number {
+	return Math.max(10, (process.stdout.rows || 40) - 1);
+}
+
+/** Top-align content inside a full-height block (bottom-anchored overlay). */
+function fitToHeight(lines: string[], height: number): string[] {
+	if (lines.length > height) return lines.slice(0, height);
+	return [...lines, ...Array(height - lines.length).fill("")];
+}
+
 function updateWidget(): void {
 	if (!ui) return;
 	if (roster.size === 0) {
@@ -477,11 +490,12 @@ class CrewOverlay implements Component {
 	}
 
 	render(width: number): readonly string[] {
-		const lines = this.#detailId ? this.#renderDetail(this.#detailId) : this.#renderList();
-		return lines.map(l => truncateToWidth(replaceTabs(l), width));
+		const height = viewportHeight();
+		const lines = this.#detailId ? this.#renderDetail(this.#detailId, height) : this.#renderList(height);
+		return fitToHeight(lines, height).map(l => truncateToWidth(replaceTabs(l), width));
 	}
 
-	#renderList(): string[] {
+	#renderList(height: number): string[] {
 		const rows = this.#rows();
 		if (this.#selected >= rows.length) this.#selected = Math.max(0, rows.length - 1);
 		const crewCount = rows.filter(r => r.kind === "crew").length;
@@ -491,8 +505,17 @@ class CrewOverlay implements Component {
 		if (rows.length === 0) {
 			lines.push(`   ${ANSI.dim}no agents yet — press n to create one${ANSI.reset}`);
 		}
+		// Chrome: title + blank + blank + hints, plus a row for each overflow marker.
+		const budget = Math.max(3, height - 6);
+		let start = 0;
+		if (rows.length > budget) {
+			start = Math.min(Math.max(0, this.#selected - Math.floor(budget / 2)), rows.length - budget);
+		}
+		const end = Math.min(rows.length, start + budget);
+		if (start > 0) lines.push(`   ${ANSI.dim}… ${start} more above${ANSI.reset}`);
 		const nameWidth = Math.max(8, ...rows.map(r => (r.kind === "crew" ? r.agent.name.length : 0)));
-		rows.forEach((r, i) => {
+		rows.slice(start, end).forEach((r, offset) => {
+			const i = start + offset;
 			const cursor = i === this.#selected ? `${ANSI.cyan}▸${ANSI.reset}` : " ";
 			if (r.kind === "crew") {
 				lines.push(` ${cursor} ${statusIcon(r.agent)} ${r.agent.name.padEnd(nameWidth)}  ${agentSummary(r.agent)}`);
@@ -509,12 +532,13 @@ class CrewOverlay implements Component {
 				);
 			}
 		});
-		lines.push("");
-		lines.push(` ${ANSI.dim}↑↓/jk select · Enter/→ open · m message · n new · ^R rename · ^X kill · Esc close${ANSI.reset}`);
-		return lines;
+		if (end < rows.length) lines.push(`   ${ANSI.dim}… ${rows.length - end} more below${ANSI.reset}`);
+		// Hints pinned to the bottom of the full-height block.
+		const hints = ` ${ANSI.dim}↑↓/jk select · Enter/→ open · m message · n new · ^R rename · ^X kill · Esc close${ANSI.reset}`;
+		return [...fitToHeight(lines, height - 1), hints];
 	}
 
-	#renderDetail(id: string): string[] {
+	#renderDetail(id: string, height: number): string[] {
 		const a = roster.get(id);
 		if (!a) return [" agent gone"];
 		const p = a.progress;
@@ -529,12 +553,13 @@ class CrewOverlay implements Component {
 		}
 		lines.push(` ${ANSI.dim}task: ${a.task.split("\n")[0]}${ANSI.reset}`);
 		lines.push("");
-		const tail = p?.recentOutput?.slice(-14) ?? [];
+		// Output tail fills whatever the header left over (blank + hints reserved).
+		const room = Math.max(1, height - lines.length - 2);
+		const tail = p?.recentOutput?.slice(-room) ?? [];
 		if (tail.length === 0) lines.push(` ${ANSI.dim}(no output yet)${ANSI.reset}`);
 		for (const out of tail) lines.push(` ${out}`);
-		lines.push("");
-		lines.push(` ${ANSI.dim}m message · o open transcript · Esc/← back${ANSI.reset}`);
-		return lines;
+		const hints = ` ${ANSI.dim}m message · o open transcript · Esc/← back${ANSI.reset}`;
+		return [...fitToHeight(lines, height - 1), hints];
 	}
 }
 

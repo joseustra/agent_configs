@@ -142,6 +142,22 @@ orchestrator pattern (one crew agent fans work out to children). Two pieces:
   by their parent's task call). A 1 s repaint timer keeps child rows live —
   their progress otherwise only surfaces through the parent's `onProgress`.
 
+### Full-height overlay (added 2026-07-24)
+
+`showHookCustom` already mounts extension overlays with `width: "100%"`,
+`maxHeight: "100%"`, `anchor: "bottom-center"`, `margin: 0`
+(`modes/controllers/extension-ui-controller.ts`), so the view's height is simply
+however many lines `render()` returns — it looked cramped only because it
+returned a handful. Both panes now pad to `process.stdout.rows - 1` (top-aligned,
+hints pinned to the last row). The list windows rows around the selection with
+`… N more above/below` markers (same idea as the built-in Agent Hub), and the
+detail pane's output tail grows to fill whatever the header leaves instead of a
+fixed 14 lines. The existing 1 s repaint timer also covers terminal resizes.
+
+Not used: `OverlayOptions.fullscreen` (alt-screen buffer) — the extension API
+only exposes `{ overlay?: boolean }`, so that flag isn't reachable without
+calling `tui.showOverlay` behind the controller's back.
+
 ### Future ideas
 
 - Worktree isolation per agent (omp has `task/worktree.ts` internally).
