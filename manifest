@@ -20,6 +20,7 @@ linkkids  claude/agents                           .claude/agents
 linkkids  claude/commands                         .claude/commands
 link  omp/agent/config.yml                        .omp/agent/config.yml
 link  omp/agent/extensions/omp-danger-guard.ts    .omp/agent/extensions/omp-danger-guard.ts
+link  omp/agent/extensions/omp-crew.ts            .omp/agent/extensions/omp-crew.ts
 link  omp/agent/commands                          .omp/agent/commands
 linkkids  omp/agent/agents                          .omp/agent/agents
 link  opencode/opencode.json                      .config/opencode/opencode.json
