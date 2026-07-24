@@ -158,6 +158,117 @@ Not used: `OverlayOptions.fullscreen` (alt-screen buffer) — the extension API
 only exposes `{ overlay?: boolean }`, so that flag isn't reachable without
 calling `tui.showOverlay` behind the controller's back.
 
+### "Where am I?" indicator (added 2026-07-24)
+
+Entering an agent (`o` in the detail pane) calls `ctx.switchSession`, which
+loads that transcript into the **main** session: `AgentSession.switchSession`
+replaces the message history and restores the model from the file, but keeps
+your own system prompt (the only `#baseSystemPrompt` assignment on that path is
+the rollback in the `catch`). So typing afterwards runs *your main agent* over
+the worker's history — it does not talk to the worker process. Messaging the
+worker itself is `m` (queue / follow-up turn), which is a different thing
+entirely. Nothing on screen distinguished the two.
+
+Now tracked via `session_before_switch` (carries `targetSessionFile`) plus
+`session_switch` (carries `previousSessionFile`): if the target matches a roster
+agent, a registry child, or any file in `.crew/sessions/`, the widget gains a
+second line naming the transcript you are in, the list marks that row
+"◂ your prompt is here", and `/crew back` switches to the session you came from
+(anchored on the first hop, so crew→crew hops don't lose the way home).
+
+### Attach-to-agent chat (added 2026-07-24)
+
+The `m` (message) / `o` (open transcript) split was the wrong model: `m` sent
+into a session whose output you couldn't see, and `o` (`switchSession`) showed
+the transcript but answered from your main agent. Enter now **attaches** instead.
+
+omp's own in-hub chat component, `AgentTranscriptViewer`
+(`modes/components/agent-transcript-viewer.ts`), renders an agent's live
+transcript with an `Editor` underneath; submitting calls
+`session.prompt(text, { streamingBehavior: "steer" })` — steers a mid-turn agent,
+prompts an idle one. The crew overlay mounts that component directly, so Enter on
+any row (crew agent or nested child) is a normal conversation with that agent,
+Esc/ctrl+a returns to the roster.
+
+Two seams made this reachable:
+
+- The component is at a *declared* subpath (`./modes/components/*` in
+  `packages/coding-agent/package.json`), unlike `./registry/*`. It's still not
+  the sanctioned ExtensionAPI, so the import is **dynamic + try/catch** and a
+  failure degrades to the old read-only pane instead of breaking the extension.
+- Sending needs an `AgentLifecycleManager` (`./registry/*`, unreachable). Crew
+  passes a shim whose `ensureLive(id)` returns `registry.get(id).session` —
+  enough because `runSubprocess` keeps workers registered after they finish.
+  It can't revive a *parked* agent, which the real manager would.
+
+Because those turns bypass `trackRun`, roster status can lag; `effectiveStatus()`
+prefers the registry's `running` over our own bookkeeping when rendering.
+
+**First-party alternative (no extension code):** crew workers register in the
+global `AgentRegistry`, so omp's built-in Agent Hub (`app.agents.hub`, default
+`alt+a`; also `ctrl+s` / ←← on an empty prompt) already lists them, and Enter
+there calls `SessionFocusController.focusAgent` — a *true* attach that rebinds
+the main editor/transcript/status to the agent's session, with ←← to detach.
+That's stronger than the embedded viewer, but `focusAgentSession` is not on
+`ExtensionCommandContext`, so crew cannot trigger it.
+
+### Main-prompt parity (added 2026-07-24)
+
+The viewer's editor is a bare `new Editor(...)` with no autocomplete, so typing
+in the crew chat lost @file completion. It's a `#private` field, so crew patches
+`Editor.prototype.setMaxHeight` for the duration of the viewer's constructor
+(the one call it makes on the fresh editor) and attaches pi-tui's own
+`CombinedAutocompleteProvider` — the class the main prompt's provider is built
+on — then restores the prototype in a `finally`. Cheeky, but contained, and it
+reuses omp's provider instead of hand-rolling completion.
+
+Still not full parity: prompt history (ctrl+r), image paste, queue mode and
+slash commands belong to the main editor's controller, not the `Editor` class.
+
+`enableLsp: false` was also dropped from the spawn: a crew agent should be as
+capable as a fresh omp session, and LSP/MCP/IRC all default on.
+
+**The real parity path is `alt+a`.** `SessionFocusController.focusAgent` binds
+the actual main editor AND the main transcript to an agent's session — literally
+"a second omp instance" on the same screen, with every prompt feature. Crew
+agents already appear there. If that's the desired daily flow, rebind
+`app.agents.hub` to `ctrl+a` in `~/.omp/agent/keybindings.yml` and let crew keep
+`/crew` for spawning, roles, rename and kill.
+
+### Features → agents (added 2026-07-24) — crew as manager, hub as the way in
+
+Settled shape of the tool, from how it's actually used:
+
+```
+▍ checkout flow      2 working · 1 done
+  ◐ research      running 4m  ▸ read src/checkout.ts
+  ◐ grilling      running 2m
+  ● prototype     done 6m  12k tok · $0.04
+▍ search revamp     1 working
+  ◐ grilling      running 1m
+    └ ◐ sub-2     running · scanning indexers
+```
+
+`CrewAgent.group` is the top level (persisted in `crew.json`); `/crew new` asks
+for the feature first, picking from existing ones or starting a new one. Headers
+are labels — the cursor steps over them — and carry a per-feature status tally.
+The feature also goes into `AgentDefinition.name`
+(`checkout-flow-research`), which is what omp's hub shows as `displayName`
+(`agentDisplayName: agent.name`, `task/executor.ts:2609`), so the grouping is
+legible from the hub too.
+
+**Division of labour.** Crew owns the board: features, spawning with roles,
+status, rename, kill, persistence. Going *inside* an agent is `ctrl+s` →
+Enter — omp's Agent Hub, whose `focusAgent` binds the real editor and the real
+transcript to that agent's session. Crew's embedded chat stays as a quick
+in-place reply, but it is deliberately the lesser path; anything that needs the
+full prompt (history, images, slash commands) should go through the hub.
+
+Crew cannot open that attach itself — `focusAgentSession` lives on
+`InteractiveMode`, not `ExtensionCommandContext`, and nothing bridges them. If
+crew should ever *be* the hub, that's an upstream ask: expose
+`focusAgentSession` (or a `ui.focusAgent(id)`) on the extension command context.
+
 ### Future ideas
 
 - Worktree isolation per agent (omp has `task/worktree.ts` internally).
