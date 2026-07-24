@@ -23,6 +23,7 @@ link  omp/agent/extensions/omp-danger-guard.ts    .omp/agent/extensions/omp-dang
 link  omp/agent/extensions/omp-crew.ts            .omp/agent/extensions/omp-crew.ts
 link  omp/agent/commands                          .omp/agent/commands
 linkkids  omp/agent/agents                          .omp/agent/agents
+linkkids  omp/agent/crew-roles                      .omp/agent/crew-roles
 link  opencode/opencode.json                      .config/opencode/opencode.json
 link  pi-devcontainer/settings.json               .pi-devcontainer/settings.json
 

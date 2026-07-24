@@ -39,7 +39,7 @@ import type {
 	ModelRegistry,
 	SingleResult,
 } from "@oh-my-pi/pi-coding-agent";
-import { runSubprocess } from "@oh-my-pi/pi-coding-agent";
+import { getAgentDir, runSubprocess } from "@oh-my-pi/pi-coding-agent";
 import { type Component, matchesKey, replaceTabs, truncateToWidth, type TUI } from "@oh-my-pi/pi-tui";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 
@@ -51,6 +51,7 @@ interface CrewAgent {
 	id: string;
 	name: string;
 	task: string;
+	role?: string;
 	model?: string;
 	status: CrewStatus;
 	startedAt: number;
@@ -167,6 +168,61 @@ function updateWidget(): void {
 	ui.setWidget("crew", [` crew  ${parts.join("  ")}   ${ANSI.dim}ctrl+a: view${ANSI.reset}`]);
 }
 
+// ── Role presets ─────────────────────────────────────────────────────────────
+// Reusable role definitions at <agent-dir>/crew-roles/*.md (profile-aware via
+// getAgentDir; canonical copies live in agent_configs/omp/agent/crew-roles).
+// Frontmatter keys: description (shown in the picker), model (spawn override).
+// Body: the agent's system prompt.
+
+interface CrewRole {
+	name: string;
+	description?: string;
+	model?: string;
+	systemPrompt: string;
+}
+
+function parseRole(name: string, raw: string): CrewRole {
+	const role: CrewRole = { name, systemPrompt: raw.trim() };
+	const fm = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+	if (fm) {
+		role.systemPrompt = raw.slice(fm[0].length).trim();
+		for (const line of fm[1].split(/\r?\n/)) {
+			const kv = line.match(/^(\w+):\s*(.*)$/);
+			if (kv?.[1] === "description") role.description = kv[2].trim();
+			if (kv?.[1] === "model") role.model = kv[2].trim() || undefined;
+		}
+	}
+	return role;
+}
+
+async function loadRoles(): Promise<CrewRole[]> {
+	const dir = path.join(getAgentDir(), "crew-roles");
+	let files: string[];
+	try {
+		files = (await fs.readdir(dir)).filter(f => f.endsWith(".md")).sort();
+	} catch {
+		return [];
+	}
+	const roles: CrewRole[] = [];
+	for (const f of files) {
+		try {
+			roles.push(parseRole(f.slice(0, -3), await Bun.file(path.join(dir, f)).text()));
+		} catch {
+			// unreadable role file — skip
+		}
+	}
+	return roles.filter(r => r.systemPrompt.length > 0);
+}
+
+/** "review" → "review-2" when a review is already on the roster. */
+function uniqueName(base: string): string {
+	const taken = new Set([...roster.values()].map(a => a.name));
+	if (!taken.has(base)) return base;
+	for (let i = 2; ; i++) {
+		if (!taken.has(`${base}-${i}`)) return `${base}-${i}`;
+	}
+}
+
 // ── Spawning ─────────────────────────────────────────────────────────────────
 
 function buildSystemPrompt(name: string): string {
@@ -177,13 +233,14 @@ function buildSystemPrompt(name: string): string {
 	].join("\n");
 }
 
-function spawnAgent(pi: ExtensionAPI, name: string, task: string, model?: string): CrewAgent {
+function spawnAgent(pi: ExtensionAPI, name: string, task: string, model?: string, role?: CrewRole): CrewAgent {
 	const id = `crew-${slug(name)}-${Date.now().toString(36)}`;
 	const abort = new AbortController();
 	const agent: CrewAgent = {
 		id,
 		name,
 		task,
+		role: role?.name,
 		model,
 		status: "running",
 		startedAt: Date.now(),
@@ -196,8 +253,8 @@ function spawnAgent(pi: ExtensionAPI, name: string, task: string, model?: string
 
 	const agentDef: AgentDefinition = {
 		name: slug(name),
-		description: `crew agent: ${name}`,
-		systemPrompt: buildSystemPrompt(name),
+		description: role?.description ?? `crew agent: ${name}`,
+		systemPrompt: role?.systemPrompt ?? buildSystemPrompt(name),
 		source: "project" as AgentSource,
 	};
 
@@ -339,7 +396,7 @@ class CrewOverlay implements Component {
 		if (!a) return [" agent gone"];
 		const p = a.progress;
 		const lines: string[] = [];
-		lines.push(`${ANSI.bold} ${statusIcon(a)} ${a.name}${ANSI.reset}  ${ANSI.dim}${a.status} · ${agentAge(a)}${p?.resolvedModel ? ` · ${p.resolvedModel}` : ""}${ANSI.reset}`);
+		lines.push(`${ANSI.bold} ${statusIcon(a)} ${a.name}${ANSI.reset}  ${ANSI.dim}${a.role ? `${a.role} · ` : ""}${a.status} · ${agentAge(a)}${p?.resolvedModel ? ` · ${p.resolvedModel}` : ""}${ANSI.reset}`);
 		if (p) {
 			lines.push(
 				` ${ANSI.dim}${Math.round(p.tokens / 1000)}k tok · $${p.cost.toFixed(2)} · ${p.toolCount} tool calls${ANSI.reset}`,
@@ -370,14 +427,41 @@ async function ensureContext(ctx: ExtensionCommandContext): Promise<void> {
 	updateWidget();
 }
 
+const BLANK_ROLE_LABEL = "(blank agent)";
+
 async function newAgentFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-	const name = (await ctx.ui.input("crew: agent name", "research / implementation / review / …"))?.trim();
+	// 1) Role — only asked when presets exist; supplies system prompt + model.
+	const roles = await loadRoles();
+	let role: CrewRole | undefined;
+	if (roles.length > 0) {
+		const picked = await ctx.ui.select("crew: role", [
+			...roles.map(r => ({ label: r.name, description: r.description ?? (r.model ? `model: ${r.model}` : undefined) })),
+			{ label: BLANK_ROLE_LABEL, description: "no preset — generic system prompt, pick model manually" },
+		]);
+		if (picked === undefined) return;
+		role = roles.find(r => r.name === picked);
+	}
+
+	// 2) Name — defaults to the role name (review, review-2, …).
+	const defaultName = role ? uniqueName(role.name) : undefined;
+	const nameInput = await ctx.ui.input(
+		"crew: agent name",
+		defaultName ? `empty = ${defaultName}` : "research / implementation / review / …",
+	);
+	if (nameInput === undefined) return;
+	const name = nameInput.trim() || defaultName;
 	if (!name) return;
-	const task = (await ctx.ui.editor(`crew: task for "${name}"`))?.trim();
+
+	// 3) Task — the only per-spawn content when a role is used.
+	const task = (await ctx.ui.editor(`crew: task for "${name}"${role ? ` (role: ${role.name})` : ""}`))?.trim();
 	if (!task) return;
-	const model = (await ctx.ui.input("crew: model override", "empty = session default"))?.trim();
-	spawnAgent(pi, name, task, model || undefined);
-	ctx.ui.notify(`crew: ${name} started`, "info");
+
+	let model = role?.model;
+	if (!role) {
+		model = (await ctx.ui.input("crew: model override", "empty = session default"))?.trim() || undefined;
+	}
+	spawnAgent(pi, name, task, model, role);
+	ctx.ui.notify(`crew: ${name} started${role ? ` (${role.name})` : ""}`, "info");
 }
 
 async function showCrewView(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {

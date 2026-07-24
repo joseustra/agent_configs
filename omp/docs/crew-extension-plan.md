@@ -87,9 +87,20 @@ Single file: `omp/agent/extensions/omp-crew.ts` (canonical here, shipped to
   `ExtensionCommandContext` relies on interactive mode's current behavior
   (`input-controller.ts:1654`).
 
+### Role presets (added 2026-07-24)
+
+Reusable role definitions at `<agent-dir>/crew-roles/*.md` (profile-aware via
+`getAgentDir()`; canonical copies in `omp/agent/crew-roles/`, linked by the
+manifest as `linkkids`). Frontmatter: `description` (shown in the role picker),
+`model` (per-role model override). Body: the agent's system prompt. `/crew new`
+starts with a role picker (plus a "blank agent" option that behaves like v1);
+a role supplies system prompt + model, defaults the agent name (`review`,
+`review-2`, …), and leaves only the task to type. Starter roles: research
+(writes `docs/research/`, never edits code), implement (builds + verifies),
+review (writes `REVIEW.md`, never edits code).
+
 ### Future ideas
 
-- Role presets (`~/.omp/crew-roles/*.md`) with per-role system prompt + model.
 - Worktree isolation per agent (omp has `task/worktree.ts` internally).
 - Send follow-up messages to running agents.
 - Auto-chain (start review when implementation completes).
