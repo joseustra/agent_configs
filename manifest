@@ -20,6 +20,11 @@ linkkids  claude/agents                           .claude/agents
 linkkids  claude/commands                         .claude/commands
 link  omp/agent/config.yml                        .omp/agent/config.yml
 link  omp/agent/extensions/omp-danger-guard.ts    .omp/agent/extensions/omp-danger-guard.ts
+# Container variant of the guard. Linked OUTSIDE extensions/ on purpose: omp loads
+# every *.ts under extensions/, so parking it there would run both guards on the host.
+# The devcontainer Makefile realpaths this path and mounts it over the container's
+# extensions/omp-danger-guard.ts, where it is the only guard omp sees.
+link  omp/agent/extensions-container/omp-danger-guard.ts  .omp/agent/extensions-container/omp-danger-guard.ts
 link  omp/agent/extensions/omp-crew.ts            .omp/agent/extensions/omp-crew.ts
 link  omp/agent/commands                          .omp/agent/commands
 linkkids  omp/agent/agents                          .omp/agent/agents
