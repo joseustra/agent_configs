@@ -14,10 +14,27 @@
  *   independent of approvalMode, so it still fires even when omp is in `yolo` mode.
  *
  * Behavior (per project decision):
- *   - match + interactive UI  -> ask `ctx.ui.confirm`; deny => block.
+ *   - match + interactive UI  -> ask `ctx.ui.confirm`; the answer is awaited across
+ *     retries (see "The 30s handler cap" below); deny => block.
  *   - match + NO UI (headless) -> BLOCK (fail-closed). Unattended runs never auto-run a
  *     gated command. In the container the sandbox (egress allowlist + file-protection) is
  *     the backstop; on the bare host there is no sandbox, so fail-closed matters more.
+ *
+ * The 30s handler cap:
+ *   `ExtensionRunner.emitToolCall` races every `tool_call` handler against
+ *   EXTENSION_HANDLER_TIMEOUT_MS (30_000) and, on expiry, blocks the call with
+ *   "Extension <path> timed out after 30000ms". There is no config knob for it. So a
+ *   handler CANNOT sit on `await ctx.ui.confirm(...)` until the human answers — and the
+ *   naive version re-opened a NEW dialog on every model retry, stacking dialogs whose
+ *   answers resolved already-abandoned promises: the user never got a prompt that did
+ *   anything, and the tool call looped forever.
+ *
+ *   Instead the dialog is opened ONCE per command and outlives the handler. Each attempt
+ *   waits WAIT_MS (< cap) on that same pending promise; if the human hasn't answered yet
+ *   the attempt is blocked with a re-run instruction, and the NEXT attempt keeps waiting
+ *   on the SAME dialog. The answer, whenever it lands, is cached and consumed by the next
+ *   attempt. Net effect for the user: the run stops at the prompt and nothing proceeds
+ *   until they answer.
  *
  * Tuning: each rule is `{ label, re }`. Comment one out to stop gating it, or add your own.
  * Order doesn't matter — first match wins and the label is shown to the user.
@@ -133,10 +150,32 @@ function firstMatch(command: string): Rule | undefined {
   return RULES.find((r) => r.re.test(r.head ? head : command));
 }
 
+// Per-attempt wait window. Must stay comfortably under EXTENSION_HANDLER_TIMEOUT_MS
+// (30_000): if the runner's race fires first, IT blocks the call with a confusing
+// "extension timed out" reason instead of ours, and the model gets no instruction to
+// re-run. Overridable (tests, or a future runner cap change).
+const WAIT_MS = Number(process.env.OMP_DANGER_GUARD_WAIT_MS ?? "") || 25_000;
+
+const PENDING = Symbol("danger-guard:pending");
+
+// One live dialog per exact command string, surviving handler timeouts.
+const inflight = new Map<string, Promise<boolean>>();
+// Answers that landed after the asking attempt was already cut off, awaiting consumption.
+const decided = new Map<string, boolean>();
+
+/** Resolves with the dialog answer, or PENDING once `ms` elapses. Never rejects. */
+function waitUpTo(p: Promise<boolean>, ms: number): Promise<boolean | typeof PENDING> {
+  const { promise, resolve } = Promise.withResolvers<typeof PENDING>();
+  const timer = setTimeout(() => resolve(PENDING), ms);
+  return Promise.race([p, promise]).finally(() => clearTimeout(timer));
+}
+
 export default function ompDangerGuard(pi: HookAPI): void {
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName !== "bash") return;
-    const command = String((event.input as { command?: unknown })?.command ?? "").trim();
+    const input: unknown = event.input;
+    const rawCommand = input && typeof input === "object" && "command" in input ? input.command : undefined;
+    const command = String(rawCommand ?? "").trim();
     if (!command) return;
 
     const hit = firstMatch(command);
@@ -147,11 +186,59 @@ export default function ompDangerGuard(pi: HookAPI): void {
       return { block: true, reason: `danger-guard: ${hit.label} blocked (no UI to confirm)` };
     }
 
-    const ok = await ctx.ui.confirm(
-      `⚠️  danger-guard: ${hit.label}`,
-      `Allow this command?\n\n${command}`,
-    );
-    if (!ok) return { block: true, reason: `danger-guard: user denied (${hit.label})` };
+    // An answer from a previous, timed-out attempt. Consume it once.
+    if (decided.has(command)) {
+      const answer = decided.get(command)!;
+      decided.delete(command);
+      if (!answer) return { block: true, reason: `danger-guard: user denied (${hit.label})` };
+      return;
+    }
+
+    let dialog = inflight.get(command);
+    if (!dialog) {
+      // Opened exactly once; deliberately NOT awaited to completion here. `.then` records
+      // the answer so a later attempt can pick it up. Rejections (aborted overlay) count
+      // as a denial rather than escaping as an unhandled rejection.
+      dialog = Promise.resolve(
+        ctx.ui.confirm(
+          `⚠️  danger-guard: ${hit.label}`,
+          `Allow this command?\n\n${command}\n\nNothing runs until you answer.`,
+        ),
+      ).then(
+        (ok) => !!ok,
+        () => false,
+      );
+      const pendingDialog = dialog;
+      dialog
+        .then((ok) => {
+          decided.set(command, ok);
+        })
+        .finally(() => {
+          if (inflight.get(command) === pendingDialog) inflight.delete(command);
+          ctx.ui.setStatus?.("danger-guard", "");
+        });
+      inflight.set(command, dialog);
+    }
+
+    ctx.ui.setStatus?.("danger-guard", `awaiting approval: ${hit.label}`);
+    const answer = await waitUpTo(dialog, WAIT_MS);
+
+    if (answer === PENDING) {
+      // Handler must return before the runner's 30s cap. The dialog stays open; the next
+      // attempt resumes waiting on it.
+      return {
+        block: true,
+        reason:
+          `danger-guard: waiting for the user to approve ${hit.label}. ` +
+          "A confirmation dialog is open and still unanswered — this is NOT a failure and NOT a denial. " +
+          "Re-issue the exact same command verbatim, immediately and as many times as needed, to keep waiting. " +
+          "Do not modify the command, do not work around the guard, and do not move on to other work.",
+      };
+    }
+
+    // Answered inside this attempt; the recorded copy is ours to drop.
+    decided.delete(command);
+    if (!answer) return { block: true, reason: `danger-guard: user denied (${hit.label})` };
     // approved -> fall through (return undefined) to let the command run.
   });
 }

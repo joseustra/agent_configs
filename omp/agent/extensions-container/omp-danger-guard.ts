@@ -38,9 +38,10 @@
  *     careless or prompt-injected commands, not a sandbox. The real containment is
  *     the read-only mounts, the egress allowlist, and file protection.
  *
- * Keeping this in sync with the host guard is manual: the rule tables below are a
- * verbatim copy. When you edit the host guard's rules, copy them here too. The two
- * files sit side by side in `agent_configs` so a diff shows exactly what differs.
+ * Keeping this in sync with the host guard is manual: the rule tables and the pending-
+ * confirmation machinery at the bottom are a verbatim copy. When you edit the host guard,
+ * copy the change here too. The two files sit side by side in `agent_configs` so a diff
+ * shows exactly what differs.
  */
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
@@ -266,10 +267,30 @@ export function firstMatch(command: string): Rule | undefined {
   return hits.find((r) => !exempt(r, command));
 }
 
+// Per-attempt wait window; see the host guard's "The 30s handler cap" note. Must stay
+// comfortably under EXTENSION_HANDLER_TIMEOUT_MS (30_000).
+const WAIT_MS = Number(process.env.OMP_DANGER_GUARD_WAIT_MS ?? "") || 25_000;
+
+const PENDING = Symbol("danger-guard:pending");
+
+// One live dialog per exact command string, surviving handler timeouts.
+const inflight = new Map<string, Promise<boolean>>();
+// Answers that landed after the asking attempt was already cut off, awaiting consumption.
+const decided = new Map<string, boolean>();
+
+/** Resolves with the dialog answer, or PENDING once `ms` elapses. Never rejects. */
+function waitUpTo(p: Promise<boolean>, ms: number): Promise<boolean | typeof PENDING> {
+  const { promise, resolve } = Promise.withResolvers<typeof PENDING>();
+  const timer = setTimeout(() => resolve(PENDING), ms);
+  return Promise.race([p, promise]).finally(() => clearTimeout(timer));
+}
+
 export default function ompDangerGuard(pi: HookAPI): void {
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName !== "bash") return;
-    const command = String((event.input as { command?: unknown })?.command ?? "").trim();
+    const input: unknown = event.input;
+    const rawCommand = input && typeof input === "object" && "command" in input ? input.command : undefined;
+    const command = String(rawCommand ?? "").trim();
     if (!command) return;
 
     const hit = firstMatch(command);
@@ -280,10 +301,59 @@ export default function ompDangerGuard(pi: HookAPI): void {
       return { block: true, reason: `danger-guard: ${hit.label} blocked (no UI to confirm)` };
     }
 
-    const ok = await ctx.ui.confirm(
-      `⚠️  danger-guard (container): ${hit.label}`,
-      `Allow this command?\n\n${command}`,
-    );
-    if (!ok) return { block: true, reason: `danger-guard: user denied (${hit.label})` };
+    // An answer from a previous, timed-out attempt. Consume it once.
+    if (decided.has(command)) {
+      const answer = decided.get(command)!;
+      decided.delete(command);
+      if (!answer) return { block: true, reason: `danger-guard: user denied (${hit.label})` };
+      return;
+    }
+
+    let dialog = inflight.get(command);
+    if (!dialog) {
+      // Opened exactly once and deliberately outliving this handler; `.then` records the
+      // answer so a later attempt can pick it up. A rejection (aborted overlay) counts as
+      // a denial rather than escaping as an unhandled rejection.
+      dialog = Promise.resolve(
+        ctx.ui.confirm(
+          `⚠️  danger-guard (container): ${hit.label}`,
+          `Allow this command?\n\n${command}\n\nNothing runs until you answer.`,
+        ),
+      ).then(
+        (ok) => !!ok,
+        () => false,
+      );
+      const pendingDialog = dialog;
+      dialog
+        .then((ok) => {
+          decided.set(command, ok);
+        })
+        .finally(() => {
+          if (inflight.get(command) === pendingDialog) inflight.delete(command);
+          ctx.ui.setStatus?.("danger-guard", "");
+        });
+      inflight.set(command, dialog);
+    }
+
+    ctx.ui.setStatus?.("danger-guard", `awaiting approval: ${hit.label}`);
+    const answer = await waitUpTo(dialog, WAIT_MS);
+
+    if (answer === PENDING) {
+      // Return before the runner's cap; the dialog stays open and the next attempt
+      // resumes waiting on it.
+      return {
+        block: true,
+        reason:
+          `danger-guard: waiting for the user to approve ${hit.label}. ` +
+          "A confirmation dialog is open and still unanswered — this is NOT a failure and NOT a denial. " +
+          "Re-issue the exact same command verbatim, immediately and as many times as needed, to keep waiting. " +
+          "Do not modify the command, do not work around the guard, and do not move on to other work.",
+      };
+    }
+
+    // Answered inside this attempt; the recorded copy is ours to drop.
+    decided.delete(command);
+    if (!answer) return { block: true, reason: `danger-guard: user denied (${hit.label})` };
+    // approved -> fall through (return undefined) to let the command run.
   });
 }
