@@ -35,8 +35,10 @@ providers, theme.
   tool. Inspects the command string and asks for confirmation only on risky
   patterns (rm, dd/mkfs, git push/reset --hard/clean, sudo, secret-file paths,
   curl|sh, package publish, mutating `gh`/`acli` verbs, …). Fires even in yolo
-  mode; blocks (fail-closed) when there's no UI to ask. Tune by
-  commenting/adding rules in the file.
+  mode; blocks (fail-closed) when there's no UI to ask. The prompt waits for you
+  indefinitely: omp caps `tool_call` handlers at 30s, so the guard keeps ONE
+  dialog open across that cap and blocks each attempt with a "re-run to keep
+  waiting" reason until you answer. Tune by commenting/adding rules in the file.
 - **`omp-crew.ts`** — per-project agents view (the "crew"). Spawn named agents
   that run in-process with full tool access, watch them, talk to them:
   - **Ctrl+A** or `/crew` — roster overlay: `↑↓/jk` select, `Enter/→` open the
