@@ -23,8 +23,8 @@ Rules:
 |---|---|
 | `completo task list [--filter all\|inbox\|today\|upcoming\|completed\|overdue] [--project-id UUID] [--tag NAME] [--search Q] [--limit N]` | default filter `all` = open tasks |
 | `completo task get <id>` | includes tags, checklist, recurrence |
-| `completo task add <title> [--description MD] [--due ISO] [--target ISO] [--alert ISO] [--project-id UUID] [--section-id UUID] [--tag NAME]... [--checklist TITLE]... [--recur FREQ [--recur-interval N] [--recur-days 2,4] [--recur-until ISO]]` | no `--project-id` → Inbox; tags auto-create |
-| `completo task update <id> [--title T] [--description MD] [--due ISO\|none] [--target ISO\|none] [--alert ISO\|none] [--project-id UUID\|none] [--section-id UUID\|none] [--tag NAME]... [--add-checklist TITLE] [--remove-checklist UUID]` | `none` clears; `--tag` replaces ALL tags |
+| `completo task add <title> [--description MD] [--due ISO] [--target ISO] [--alert ISO] [--open-ended] [--project-id UUID] [--section-id UUID] [--tag NAME]... [--checklist TITLE]... [--recur FREQ [--recur-interval N] [--recur-days 2,4] [--recur-until ISO]]` | no `--project-id` → Inbox; tags auto-create |
+| `completo task update <id> [--title T] [--description MD] [--due ISO\|none] [--target ISO\|none] [--alert ISO\|none] [--open-ended true\|false] [--project-id UUID\|none] [--section-id UUID\|none] [--tag NAME]... [--add-checklist TITLE] [--remove-checklist UUID]` | `none` clears; `--tag` replaces ALL tags; `--open-ended` needs a due date and clears with it |
 | `completo task complete <id>` | recurring tasks return the next occurrence |
 | `completo task delete <id>` | permanent |
 | `completo project list [--all] [--search Q]` | `--all` includes completed |

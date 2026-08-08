@@ -1,5 +1,8 @@
 # Global rules
 
+## IMPORTANT
+Never commit directly to main/master
+
 ## Delegate Elixir/mix commands to the `mix-runner` subagent
 
 Whenever an Elixir/mix build or verification command needs to run — `mix test`,
