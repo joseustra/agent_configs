@@ -20,15 +20,18 @@ linkkids  claude/agents                           .claude/agents
 linkkids  claude/commands                         .claude/commands
 link  omp/agent/config.yml                        .omp/agent/config.yml
 link  omp/agent/extensions/omp-danger-guard.ts    .omp/agent/extensions/omp-danger-guard.ts
-# Container variant of the guard. Linked OUTSIDE extensions/ on purpose: omp loads
-# every *.ts under extensions/, so parking it there would run both guards on the host.
-# The devcontainer Makefile realpaths this path and mounts it over the container's
-# extensions/omp-danger-guard.ts, where it is the only guard omp sees.
-link  omp/agent/extensions-container/omp-danger-guard.ts  .omp/agent/extensions-container/omp-danger-guard.ts
+# Second link to the SAME guard, at the path the devcontainer Makefile realpaths and
+# mounts. There is no longer a separate container variant to keep in sync: the guard
+# detects the container at runtime (/.dockerenv) and enables its sandbox rules itself.
+# Kept OUTSIDE extensions/ because omp loads every *.ts there and would run it twice.
+link  omp/agent/extensions/omp-danger-guard.ts    .omp/agent/extensions-container/omp-danger-guard.ts
 link  omp/agent/extensions/omp-crew.ts            .omp/agent/extensions/omp-crew.ts
 link  omp/agent/commands                          .omp/agent/commands
 linkkids  omp/agent/agents                          .omp/agent/agents
 linkkids  omp/agent/crew-roles                      .omp/agent/crew-roles
+# Global git hooks. `make install` also points core.hooksPath here — this is what
+# actually enforces the protected-branch rule, independent of any agent harness.
+linkkids  git/githooks                            .githooks
 link  opencode/opencode.json                      .config/opencode/opencode.json
 link  pi-devcontainer/settings.json               .pi-devcontainer/settings.json
 

@@ -5,7 +5,7 @@ REPO := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 # Non-comment, non-blank manifest lines.
 ROWS := grep -vE '^[[:space:]]*(\#|$$)' '$(REPO)/manifest'
 
-.PHONY: help install status uninstall doctor
+.PHONY: help install status uninstall doctor githooks test
 .DEFAULT_GOAL := help
 
 help:
@@ -14,7 +14,31 @@ help:
 	@echo "  status     show each managed path's state"
 	@echo "  uninstall  remove the symlinks we created (restore .bak); leaves seeds"
 	@echo "  doctor     check no secret/per-host file is tracked; list missing seeds"
+	@echo "  githooks   point git's global core.hooksPath at ~/.githooks"
+	@echo "  test       run the danger-guard policy tests (needs bun)"
 	@echo "Repo: $(REPO)"
+
+# The pre-push hook is the guarantee behind the danger-guard extension: the extension
+# reads command strings and is blind to `make deploy`; git's hook sees the real refs.
+githooks:
+	@chmod +x "$(REPO)"/git/githooks/* 2>/dev/null || true
+	@if [ "$$(git config --global --get core.hooksPath)" = "$(HOME)/.githooks" ]; then \
+	  echo "ok     core.hooksPath -> $(HOME)/.githooks"; \
+	elif git config --global core.hooksPath "$(HOME)/.githooks" 2>/dev/null; then \
+	  echo "config core.hooksPath -> $(HOME)/.githooks"; \
+	else \
+	  printf '[core]\n\thooksPath = %s/.githooks\n' "$(HOME)" >> "$(HOME)/.gitconfig"; \
+	  echo "config core.hooksPath -> $(HOME)/.githooks (via ~/.gitconfig)"; \
+	  echo "       ~/.config/git/config is read-only (home-manager owns it). git reads"; \
+	  echo "       ~/.gitconfig AFTER the XDG file, so this overrides cleanly — but it is"; \
+	  echo "       now a second source of truth nix doesn't manage. Better: declare it in"; \
+	  echo "       home-manager and delete ~/.gitconfig:"; \
+	  echo "         programs.git.extraConfig.core.hooksPath = \"$(HOME)/.githooks\";"; \
+	fi
+	@printf 'check  effective core.hooksPath: %s\n' "$$(git config --get core.hooksPath || echo NONE)"
+
+test:
+	@cd "$(REPO)" && bun test omp/agent/extensions/__tests__
 
 install:
 	@$(ROWS) | while read -r type src dst mode; do \
@@ -58,6 +82,7 @@ install:
 	      echo "seed   $$dst (from $$src)"; ;; \
 	  esac; \
 	done
+	@$(MAKE) --no-print-directory githooks
 
 status:
 	@$(ROWS) | while read -r type src dst mode; do \

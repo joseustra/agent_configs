@@ -31,14 +31,52 @@ providers, theme.
 
 ### `agent/extensions/` (linked per-file)
 
-- **`omp-danger-guard.ts`** — argument-aware confirmation gate for the `bash`
-  tool. Inspects the command string and asks for confirmation only on risky
-  patterns (rm, dd/mkfs, git push/reset --hard/clean, sudo, secret-file paths,
-  curl|sh, package publish, mutating `gh`/`acli` verbs, …). Fires even in yolo
-  mode; blocks (fail-closed) when there's no UI to ask. The prompt waits for you
-  indefinitely: omp caps `tool_call` handlers at 30s, so the guard keeps ONE
-  dialog open across that cap and blocks each attempt with a "re-run to keep
-  waiting" reason until you answer. Tune by commenting/adding rules in the file.
+- **`omp-danger-guard.ts`** — policy gate for the `bash`, `write` and `edit`
+  tools. Fires even in yolo mode. Three tiers around one spatial boundary:
+
+  | Tier | What | Examples |
+  |---|---|---|
+  | **allow** (silent) | anything inside the **session root** (`ctx.cwd`), and any git/GitHub work on a non-protected branch | `rm -rf _build`, `rm -rf src/*`, `git reset --hard`, `git rebase`, force-push a feature branch, `gh pr create`, `gh issue comment` |
+  | **confirm** | leaves the machine, touches another person, or escapes the root | `rm` outside the root, push to `main`, `npm publish`, `gh pr merge`, `gh release create`, `sudo`, `terraform apply`, secrets heading for a network sink |
+  | **block** (no dialog) | unrecoverable, no legitimate agent form | force-push/delete `main`, `rm -rf .git`, `git reflog expire`, `mkfs`/`dd of=/dev/…`, `gh repo delete`, `git push --no-verify` |
+
+  The boundary replaces the old "list every disposable build dir" approach:
+  paths are resolved through symlinks and judged by *location*, so there is no
+  `_build`/`node_modules` allowlist to maintain. Anything it can't resolve
+  statically (`$VAR`, backticks, a dot-glob that could match `.git`) falls to
+  **confirm** — it fails closed, never open.
+
+  Block tier gets no dialog on purpose: a prompt you can click through is exactly
+  what prompt-fatigue and prompt-injection defeat. Escape hatch is you, in your
+  own terminal.
+
+  Before any destructive **allow**, it writes a `refs/danger-guard/<ts>` snapshot
+  commit (throwaway index, working tree untouched). That closes the gap in "git
+  is my backup" — git recovers *committed* work, and the allow tier can destroy
+  uncommitted edits and untracked files. Recover with
+  `git log refs/danger-guard/*` then `git checkout <ref> -- <path>`. It respects
+  `.gitignore`, which is why deleting a gitignored `.env` is *confirm*, not allow.
+
+  **It is a speed bump, not containment.** It sees a command *string*, so
+  `make deploy` / `npm run release` / `bash ship.sh` hide their contents from it.
+  The real guarantee about protected branches is
+  [`git/githooks/pre-push`](../git/githooks/pre-push) — git enforces that one no
+  matter how the push was invoked, which is why the extension blocks agent-issued
+  `--no-verify` and `core.hooksPath` overrides.
+
+  Container: same single file. It detects `/.dockerenv` at runtime and switches
+  on the sandbox rules (firewall, squid allowlist, read-only host mounts). There
+  is no separate container variant to keep in sync any more — the manifest links
+  the one file into both places.
+
+  The prompt waits for you indefinitely: omp caps `tool_call` handlers at 30s, so
+  the guard keeps ONE dialog open across that cap and blocks each attempt with a
+  "re-run to keep waiting" reason until you answer.
+
+  Policy is tested: `make test` (89 cases in
+  [`extensions/__tests__`](agent/extensions/__tests__/danger-guard.test.ts)).
+  Tune `PROTECTED_BRANCHES`, `SNAPSHOT_BEFORE_DESTRUCTIVE`, and the rule tables at
+  the top of the file; add a case to the table when you do.
 - **`omp-crew.ts`** — per-project agents view (the "crew"). Spawn named agents
   that run in-process with full tool access, watch them, talk to them:
   - **Ctrl+A** or `/crew` — roster overlay: `↑↓/jk` select, `Enter/→` open the

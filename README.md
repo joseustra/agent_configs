@@ -78,7 +78,27 @@ cd ~/Developer/agent_configs && make install
 ## Relationship to the devcontainer
 
 The devcontainer repo (`thesidejourney/devcontainer`) **bind-mounts** `~/.omp/agent/config.yml`
-and `~/.omp/agent/extensions/omp-danger-guard.ts` into the container (its Makefile resolves
-the symlinks here via `realpath`), so the omp danger-guard runs in the container too — same
-single source as the host. The per-host model overlays in `~/.pi-devcontainer/` (`host.internal`
-endpoints) are likewise mounted in. Nothing omp-related is baked into the image anymore.
+and `~/.omp/agent/extensions-container/omp-danger-guard.ts` into the container (its Makefile
+resolves the symlinks here via `realpath`), so the omp danger-guard runs in the container too.
+That path is now a second symlink to the *same* guard file as the host one: the guard detects
+`/.dockerenv` at runtime and enables its sandbox-specific rules itself, so there is no separate
+container variant to keep in sync. The devcontainer repo needs no change. The per-host model
+overlays in `~/.pi-devcontainer/` (`host.internal` endpoints) are likewise mounted in. Nothing
+omp-related is baked into the image anymore.
+
+## Guardrails
+
+Two layers, deliberately separate:
+
+- **`omp/agent/extensions/omp-danger-guard.ts`** — the UX layer. Reads each `bash`/`write`/`edit`
+  tool call and sorts it into allow / confirm / block around one boundary: the session root.
+  Inside it the agent works freely; outside it, or anywhere the command can't be pinned to a
+  location, it asks. Details in [`omp/README.md`](omp/README.md).
+- **`git/githooks/pre-push`** — the guarantee. The extension only sees command *strings*, so
+  `make deploy` or `bash ship.sh` hides a push from it. This hook is enforced by git itself and
+  refuses direct, force, and delete pushes to `main`/`master`/`develop`/`production`/`release/*`
+  however the push was invoked. `make install` points global `core.hooksPath` at `~/.githooks`.
+  Override is yours alone: `git push --no-verify` (the extension blocks agent-issued ones).
+
+A repo that sets its own `core.hooksPath` (husky, lefthook) shadows the global hook — in those
+repos the extension is the only layer.
