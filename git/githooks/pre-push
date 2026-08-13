@@ -1,0 +1,41 @@
+#!/bin/sh
+# danger-guard pre-push — the GUARANTEE behind the omp danger-guard extension.
+#
+# The extension inspects a command string, so it is blind to `make deploy`, `npm run
+# release`, `bash ship.sh`, or a git alias — any of which can push to main without the
+# word "push" ever appearing in what the agent typed. This hook sits where git itself
+# enforces it: it sees the actual refs being updated, no matter how the push was started.
+#
+# Installed globally via `core.hooksPath` (see the repo Makefile). A repo that sets its
+# own `core.hooksPath` (husky, lefthook) shadows this one — `make doctor` flags those.
+#
+# Override, when it is YOU deciding and not an agent:  git push --no-verify …
+# The extension blocks agent-issued `--no-verify` pushes precisely so this stays yours.
+
+protected='^refs/heads/(main|master|develop|production|release/.*)$'
+zero='0000000000000000000000000000000000000000'
+status=0
+
+while read -r _local_ref local_sha remote_ref remote_sha; do
+	echo "$remote_ref" | grep -Eq "$protected" || continue
+	branch=${remote_ref#refs/heads/}
+
+	if [ "$local_sha" = "$zero" ]; then
+		echo "danger-guard: refusing to DELETE protected branch '$branch'." >&2
+		status=1
+	elif [ "$remote_sha" != "$zero" ] && ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+		echo "danger-guard: refusing NON-FAST-FORWARD (force) push to protected branch '$branch'." >&2
+		echo "              This would discard commits that are on the remote." >&2
+		status=1
+	else
+		echo "danger-guard: refusing direct push to protected branch '$branch'. Open a PR instead." >&2
+		status=1
+	fi
+done
+
+if [ "$status" -ne 0 ]; then
+	echo "" >&2
+	echo "  If you mean it, run it yourself:  git push --no-verify ..." >&2
+fi
+
+exit "$status"
