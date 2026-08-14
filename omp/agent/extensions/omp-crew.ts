@@ -15,8 +15,10 @@
  * What it is NOT:
  *   Crew never renders a transcript and has no attach. omp's own agent hub
  *   (ctrl+s or alt+a, then Enter) attaches, kills, and messages; crew points at
- *   the agent and gets out of the way. Only three verbs live here, and only
- *   because the hub cannot offer them: `n` dispatch, `f` feature, `o` output.
+ *   the agent and gets out of the way. Four verbs live here, and only because
+ *   the hub cannot offer them: `n` dispatch, `f` feature, `o` output, and `s`
+ *   stop — interrupt the current turn and leave the agent standing, which omp
+ *   can do to your main session but to no subagent, from anywhere.
  *
  *   Handing off costs two keystrokes, not one, and that is structural: omp binds
  *   the hub on the editor, which sees no input while an extension overlay is
@@ -60,7 +62,10 @@ interface AgentRef {
 	kind: "main" | "sub" | "advisor";
 	parentId?: string;
 	status: "running" | "idle" | "parked" | "aborted";
-	session?: { progress?: { tokens?: number; cost?: number } } | null;
+	session?: {
+		progress?: { tokens?: number; cost?: number };
+		abort?(opts?: { reason?: string }): Promise<void>;
+	} | null;
 	sessionFile?: string | null;
 	createdAt: number;
 	lastActivity?: number;
@@ -499,6 +504,7 @@ type Action =
 	| { type: "dispatch"; feature?: string; askFeature: boolean }
 	| { type: "feature"; agentId: string }
 	| { type: "open"; agentId: string }
+	| { type: "stop"; agentId: string }
 	| { type: "handoff"; agentId?: string };
 
 const DEBUG_KEYS = !!process.env.CREW_DEBUG_KEYS;
@@ -720,6 +726,11 @@ class CrewOverlay implements Component {
 		} else if (is("o")) {
 			const row = this.#selected(rows);
 			if (row?.kind === "agent") this.done({ type: "open", agentId: row.ref.id });
+		} else if (is("s")) {
+			const row = this.#selected(rows);
+			if (row?.kind === "agent" && row.ref.status === "running") {
+				this.done({ type: "stop", agentId: row.ref.id });
+			}
 		} else if (is("ctrl+s") || is("alt+a") || is("alt+c")) {
 			// omp binds its hub on the EDITOR (editor.setCustomKeyHandler), and while
 			// this overlay is mounted the editor sees nothing — so ctrl+s inside crew
@@ -772,7 +783,7 @@ class CrewOverlay implements Component {
 		return [
 			dim("─".repeat(Math.max(10, width))),
 			target,
-			dim(`enter collapse/expand · ${dispatchKey} · f feature · o output · esc close`),
+			dim(`enter collapse/expand · ${dispatchKey} · s stop · f feature · o output · esc close`),
 			// Two keystrokes, and the footer says so rather than implying one: the
 			// first leaves crew, the second reaches omp's hub for attach/kill/message.
 			dim("ctrl+s / alt+a: leave crew, then press it again for omp's hub"),
@@ -832,6 +843,11 @@ function artifactsDir(ctx: ExtensionCommandContext): string | undefined {
 	return sm?.getSessionFile?.()?.slice(0, -6) ?? undefined;
 }
 
+function hasEmit(pi: ExtensionAPI): boolean {
+	const events = (pi as unknown as { events?: { emit?: unknown } }).events;
+	return typeof events?.emit === "function";
+}
+
 async function dispatchFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext, action: Extract<Action, { type: "dispatch" }>): Promise<void> {
 	if (breakage.dispatch) {
 		ctx.ui.notify(`crew: dispatch is unavailable — omp no longer exports ${breakage.dispatch}`, "error");
@@ -883,10 +899,25 @@ async function dispatchFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext, acti
 		id,
 		index: nextIndex++,
 		artifactsDir: dir,
-		eventBus: (pi as unknown as { events?: unknown }).events,
+		// Cosmetic (hub progress rows), and runSubprocess calls .emit() on it — so
+		// pass it only if it actually is an emitter. It was previously handed
+		// whatever `api.events` happened to be, which was a crash waiting to fire.
+		eventBus: hasEmit(pi) ? (pi as unknown as { events: unknown }).events : undefined,
+		// Grouping/ordering only; no abort or lifecycle routing hangs off it, so a
+		// synthetic id is honest here — there is no parent tool call.
 		parentToolCallId: id,
+		// Nest under the main session the way omp's own task spawns do.
+		parentAgentId: "Main",
+		// Keep the entry in the registry as `idle` once the run ends, instead of
+		// unregistering it — this is what makes a finished agent still readable.
+		keepAlive: true,
 		modelRegistry: (ctx as unknown as { modelRegistry?: unknown }).modelRegistry,
 		settings: barrel.settings,
+		// Deliberately no `signal`. It is the only external abort for the whole
+		// run, and wiring it to the main session would make crew's agents die
+		// whenever you interrupt your own turn — they are background work, not
+		// part of it. Stopping a turn is `s` (session.abort); killing outright
+		// stays with omp's hub `x`.
 	});
 
 	// Fire-and-forget still has to answer for itself: an unhandled rejection here
@@ -925,6 +956,48 @@ async function featureFlow(ctx: ExtensionCommandContext, agentId: string): Promi
 	}
 	featureById.set(root.id, feature);
 	void rememberFeature(feature);
+}
+
+/**
+ * omp's own user-interrupt reason. This exact string is load-bearing, not a
+ * label: `AgentSession.abort` compares against it to decide whether this was a
+ * user interrupt, and only then inserts the interrupt marker, sets
+ * `autoResumeSuppressed` so the agent does not carry on by itself, and restores
+ * queued messages. Any other string aborts the turn but leaves the agent free to
+ * resume — the opposite of what `s` is for.
+ */
+const USER_INTERRUPT = "Interrupted by user";
+
+/**
+ * Stop the current turn and leave the agent standing.
+ *
+ * This is deliberately NOT what omp's hub does. `x` there is
+ * `session.abort()` *plus* `release(..., { tombstone: true })`, and the
+ * tombstone is terminal: it stamps the registry entry `aborted` (a status
+ * `setStatus` refuses to leave), detaches the session, and writes a marker that
+ * survives restarts. Aborting without releasing cancels only the in-flight
+ * turn — the entry lands on `idle` through the ordinary `agent_end` event, so
+ * it stays listed, stays enterable, and takes a fresh prompt.
+ */
+async function stopAgent(ctx: ExtensionCommandContext, agentId: string): Promise<void> {
+	const ref = registry()?.get(agentId);
+	if (!ref) return;
+	if (ref.status !== "running") {
+		ctx.ui.notify(`crew: ${ref.displayName} is not running`, "warning");
+		return;
+	}
+	if (!ref.session?.abort) {
+		// Running, but crew has no handle on it — a remote/collab-mirrored entry,
+		// or an omp whose session no longer exposes abort.
+		ctx.ui.notify(`crew: ${ref.displayName} has no session crew can stop — use ctrl+s`, "warning");
+		return;
+	}
+	try {
+		await ref.session.abort({ reason: USER_INTERRUPT });
+		ctx.ui.notify(`crew: stopped ${ref.displayName} — attach with ctrl+s to redirect it`, "info");
+	} catch (err) {
+		ctx.ui.notify(`crew: could not stop ${ref.displayName} — ${message(err)}`, "error");
+	}
 }
 
 /** Opens the yield payload — the .md, not the raw .jsonl transcript, which is
@@ -968,6 +1041,9 @@ async function showCrew(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
 				break;
 			case "open":
 				openOutput(ctx, action.agentId);
+				break;
+			case "stop":
+				await stopAgent(ctx, action.agentId);
 				break;
 			case "handoff": {
 				const ref = action.agentId ? registry()?.get(action.agentId) : undefined;

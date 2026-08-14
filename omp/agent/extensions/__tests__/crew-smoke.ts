@@ -250,6 +250,36 @@ const show = (title: string, lines: readonly string[]) => {
   console.log("alt+a on a non-agent row:", notices);
 }
 
+// ── 3e. `s` interrupts the turn without tombstoning the agent ────────────────
+{
+  notices.length = 0;
+  let abortedWith: any = "NOT CALLED";
+  refs[0].session.abort = async (opts: any) => { abortedWith = opts; };
+  const api = makeApi();
+  ompCrew(api as any);
+  keyScript = ["j", "s"]; // cursor onto the running `implement`, then stop
+  const ctx = makeCtx();
+  await handlers.shortcut(ctx).catch(() => {});
+  await Bun.sleep(30);
+  console.log("\n══ 3e. `s` stop ══════════════════════════════════════════════");
+  console.log("session.abort called with:", abortedWith);
+  console.log("reason is omp's exact user-interrupt string:",
+    abortedWith?.reason === "Interrupted by user");
+  console.log("notices:", notices);
+  console.log("still listed after stop:", refs.some(r => r.id === "root-a"));
+}
+{
+  // an idle row must refuse rather than pretend
+  notices.length = 0;
+  const api = makeApi();
+  ompCrew(api as any);
+  keyScript = ["j", "j", "j", "s"]; // onto an idle row
+  const ctx = makeCtx();
+  await handlers.shortcut(ctx).catch(() => {});
+  await Bun.sleep(30);
+  console.log("`s` on a non-running row:", notices.length === 0 ? "ignored (no action)" : notices);
+}
+
 // ── 4. registry missing → tombstone ──────────────────────────────────────────
 {
   notices.length = 0;
