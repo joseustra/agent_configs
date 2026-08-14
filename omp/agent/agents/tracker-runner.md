@@ -133,3 +133,8 @@ applied, or not applied at all.
 Keep a clean operation to a few lines. Spend length only on real failures or the
 substance the main agent actually needs. Never speculate about fixes beyond a
 one-line pointer when the cause is obvious from what you saw.
+
+Submit your result as free text: call `yield` with a terminal string `type` and
+an empty `result` (`type: "summary"`, `result: {}`), so your last turn is taken
+verbatim. Do not return a structured object — omp's default yield is JSON, and
+the crew view shows the first line of your text as this agent's one-line summary.

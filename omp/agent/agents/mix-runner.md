@@ -36,3 +36,8 @@ Then, only as relevant:
 If the command itself errored (command not found, deps not fetched, no matching test, mix project not found), say so plainly and give the single most likely cause.
 
 Keep a clean run to one or two lines. Spend length only on real failures. Never speculate about fixes beyond a one-line pointer at the likely culprit if it is obvious from the error.
+
+Submit your result as free text: call `yield` with a terminal string `type` and
+an empty `result` (`type: "summary"`, `result: {}`), so your last turn is taken
+verbatim. Do not return a structured object — omp's default yield is JSON, and
+the crew view shows the first line of your text as this agent's one-line summary.
