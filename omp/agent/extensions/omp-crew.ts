@@ -51,7 +51,7 @@ import type { Component } from "@oh-my-pi/pi-tui";
 // vanished symbol surface as a message about that symbol instead.
 
 /** The omp release this file's use of the barrel was verified against. */
-const VERIFIED_AGAINST = "17.2.10";
+const VERIFIED_AGAINST = "17.3.0";
 
 /** A registry entry. Shaped by AgentRegistry.register(); see docs/research/r2. */
 interface AgentRef {
@@ -503,10 +503,87 @@ type Action =
 
 const DEBUG_KEYS = !!process.env.CREW_DEBUG_KEYS;
 
-/** omp's two hub bindings, plus crew's own opener, as raw input. */
-const CTRL_S = "\x13";
-const ALT_A = "\x1ba";
-const ALT_C = "\x1bc";
+// ── Key matching ─────────────────────────────────────────────────────────────
+// Never compare raw bytes. omp asks the terminal for the Kitty keyboard
+// protocol at startup and falls back to xterm modifyOtherKeys if it gets no
+// answer within 150ms, so the *same* key arrives as different bytes on
+// different terminals: ctrl+s is `\x13` on Terminal.app and `\x1b[115;5u` on
+// Ghostty. Hand-rolled byte equality silently matched only the first, which is
+// how crew shipped with every modified key dead on half the machines.
+//
+// omp's own matcher handles all three encodings, but it lives on `pi-tui`, not
+// on the `api.pi` barrel — so it is loaded dynamically, and a fallback covers
+// the same grammar if that ever stops resolving. Per D7: degrade, never vanish.
+
+type KeyMatcher = (data: string, key: string) => boolean;
+
+let matchKey: KeyMatcher = fallbackMatch;
+let keyMatcherLoaded = false;
+
+async function loadKeyMatcher(): Promise<void> {
+	if (keyMatcherLoaded) return;
+	keyMatcherLoaded = true;
+	try {
+		const mod = (await import("@oh-my-pi/pi-tui")) as { matchesKey?: KeyMatcher };
+		if (typeof mod.matchesKey === "function") matchKey = mod.matchesKey;
+	} catch {
+		// Keep the fallback. Crew stays usable; it just knows fewer keys.
+	}
+}
+
+/** `1 + bitmask`, with caps-lock (64) and num-lock (128) masked off. */
+function modifierNames(mods: number): string[] {
+	const names: string[] = [];
+	if (mods & 1) names.push("shift");
+	if (mods & 4) names.push("ctrl");
+	if (mods & 2) names.push("alt");
+	if (mods & 8) names.push("super");
+	return names;
+}
+
+function namedKey(codepoint: number, mods: number): string | undefined {
+	const base =
+		codepoint === 27 ? "escape" : codepoint === 13 ? "enter" : codepoint === 9 ? "tab" : codepoint === 32 ? "space" : String.fromCodePoint(codepoint).toLowerCase();
+	return [...modifierNames(mods & ~192), base].join("+");
+}
+
+const CSI_U = /^\x1b\[(\d+)(?::\d*)?(?::\d+)?(?:;(\d+))?(?::(\d+))?u$/;
+const MODIFY_OTHER_KEYS = /^\x1b\[27;(\d+);(\d+)~$/;
+
+function parseKeyFallback(data: string): string | undefined {
+	const csi = CSI_U.exec(data);
+	if (csi) {
+		if (csi[3] === "3") return undefined; // key release, not a press
+		return namedKey(Number(csi[1]), (csi[2] ? Number(csi[2]) : 1) - 1);
+	}
+	const legacy = MODIFY_OTHER_KEYS.exec(data);
+	if (legacy) return namedKey(Number(legacy[2]), Number(legacy[1]) - 1);
+
+	if (data === "\x1b") return "escape";
+	if (data === "\r" || data === "\n") return "enter";
+	if (data === "\x1b[A") return "up";
+	if (data === "\x1b[B") return "down";
+	if (data.length === 2 && data.startsWith("\x1b")) return `alt+${data[1].toLowerCase()}`;
+	if (data.length === 1) {
+		const code = data.charCodeAt(0);
+		if (code >= 1 && code <= 26) return `ctrl+${String.fromCharCode(96 + code)}`;
+		return data;
+	}
+	return undefined;
+}
+
+/** Modifier order is not significant, so compare on a sorted form. */
+function canonicalKey(key: string): string {
+	const parts = key.toLowerCase().split("+");
+	const base = parts.pop() ?? "";
+	return [...parts.sort(), base].join("+");
+}
+
+/** Exported for the smoke harness; omp only ever loads the default export. */
+export function fallbackMatch(data: string, key: string): boolean {
+	const parsed = parseKeyFallback(data);
+	return parsed !== undefined && canonicalKey(parsed) === canonicalKey(key);
+}
 
 interface TUILike {
 	requestRender(): void;
@@ -612,20 +689,23 @@ class CrewOverlay implements Component {
 		// which is the whole diagnostic: "nothing happened" and "crew never saw it"
 		// look identical from the outside, and this tells them apart.
 		if (DEBUG_KEYS) {
-			this.#lastKey = `${[...data].map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" ")}  (${JSON.stringify(data)})`;
+			const hex = [...data].map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" ");
+			this.#lastKey = `${hex}  (${JSON.stringify(data)}) → ${parseKeyFallback(data) ?? "?"}`;
 			this.#keyCount++;
 			this.tui.requestRender();
 		}
 
-		if (data === "\x1b" || data === "q" || data === "\x03") {
+		const is = (key: string) => matchKey(data, key);
+
+		if (is("escape") || is("q") || is("ctrl+c")) {
 			this.done(undefined);
-		} else if (data === "\x1b[A" || data === "k") {
+		} else if (is("up") || is("k")) {
 			this.#move(rows, -1);
-		} else if (data === "\x1b[B" || data === "j") {
+		} else if (is("down") || is("j")) {
 			this.#move(rows, 1);
-		} else if (data === "\r" || data === "\n") {
+		} else if (is("enter")) {
 			this.#act(rows);
-		} else if (data === "n") {
+		} else if (is("n")) {
 			if (breakage.dispatch) return;
 			const row = this.#selected(rows);
 			this.done({
@@ -633,14 +713,14 @@ class CrewOverlay implements Component {
 				feature: this.#featureAtCursor(rows),
 				askFeature: row?.kind === "new-feature",
 			});
-		} else if (data === "f") {
+		} else if (is("f")) {
 			const row = this.#selected(rows);
 			// A header is a label for a feature, not a thing that has one.
 			if (row?.kind === "agent") this.done({ type: "feature", agentId: row.ref.id });
-		} else if (data === "o") {
+		} else if (is("o")) {
 			const row = this.#selected(rows);
 			if (row?.kind === "agent") this.done({ type: "open", agentId: row.ref.id });
-		} else if (data === CTRL_S || data === ALT_A || data === ALT_C) {
+		} else if (is("ctrl+s") || is("alt+a") || is("alt+c")) {
 			// omp binds its hub on the EDITOR (editor.setCustomKeyHandler), and while
 			// this overlay is mounted the editor sees nothing — so ctrl+s inside crew
 			// would otherwise be swallowed here and look broken. Crew cannot open the
@@ -869,6 +949,8 @@ function openOutput(ctx: ExtensionCommandContext, agentId: string): void {
 async function showCrew(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
 	cwd = ctx.cwd;
 	if (!ctx.hasUI) return;
+	// Before the overlay mounts: handleInput is synchronous and cannot await.
+	await loadKeyMatcher();
 
 	while (true) {
 		const action = await ctx.ui.custom<Action | undefined>(

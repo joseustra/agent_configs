@@ -16,7 +16,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import ompCrew from "../omp-crew.ts";
+import ompCrew, { fallbackMatch } from "../omp-crew.ts";
 
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "crew-smoke-"));
 const agentDir = path.join(tmp, "agentdir");
@@ -194,6 +194,35 @@ const show = (title: string, lines: readonly string[]) => {
   await handlers.shortcut(ctx).catch(() => {});
   await Bun.sleep(30);
   show("3c. `f` on the nested `research` row regroups its ROOT (implement)", lastRender);
+}
+
+// ── 3d-pre. every encoding omp can deliver reaches the same action ───────────
+// Regression for the real bug: on a Kitty-protocol terminal ctrl+s arrives as
+// \x1b[115;5u, never as \x13. Raw byte equality matched only the legacy form.
+{
+  console.log("\n══ 3d-pre. key encodings ═════════════════════════════════════");
+  const cases: [string, string, string][] = [
+    ["\x13",             "ctrl+s", "ctrl+s legacy"],
+    ["\x1b[115;5u",      "ctrl+s", "ctrl+s kitty"],
+    ["\x1b[27;5;115~",   "ctrl+s", "ctrl+s modifyOtherKeys"],
+    ["\x1ba",            "alt+a",  "alt+a legacy"],
+    ["\x1b[97;3u",       "alt+a",  "alt+a kitty"],
+    ["\x1b[99;3u",       "alt+c",  "alt+c kitty"],
+    ["\x1b",             "escape", "escape legacy"],
+    ["\x1b[27u",         "escape", "escape kitty"],
+    ["\r",               "enter",  "enter legacy"],
+    ["\x1b[13u",         "enter",  "enter kitty"],
+    ["j",                "j",      "plain j"],
+    ["\x1b[A",           "up",     "up arrow"],
+    ["\x1b[115;6u",      "shift+ctrl+s", "modifier order insensitive"],
+  ];
+  for (const [bytes, key, label] of cases) {
+    const ok = fallbackMatch(bytes, key);
+    console.log(`  ${ok ? "ok  " : "FAIL"} ${label.padEnd(28)} ${JSON.stringify(bytes)} vs "${key}"`);
+  }
+  // a key release must NOT fire the action
+  const release = fallbackMatch("\x1b[97;3:3u", "alt+a");
+  console.log(`  ${release === false ? "ok  " : "FAIL"} key release ignored`);
 }
 
 // ── 3d. ctrl+s inside crew hands off instead of being swallowed ──────────────
