@@ -501,6 +501,8 @@ type Action =
 	| { type: "open"; agentId: string }
 	| { type: "handoff"; agentId?: string };
 
+const DEBUG_KEYS = !!process.env.CREW_DEBUG_KEYS;
+
 /** omp's two hub bindings, plus crew's own opener, as raw input. */
 const CTRL_S = "\x13";
 const ALT_A = "\x1ba";
@@ -519,6 +521,8 @@ class CrewOverlay implements Component {
 	 *  so an index silently re-targets `f` and `n` at whatever slid underneath it. */
 	#cursor: string | undefined;
 	#scroll = 0;
+	#lastKey = "(none yet)";
+	#keyCount = 0;
 	#timer: ReturnType<typeof setInterval>;
 	#unsubscribe: (() => void) | undefined;
 
@@ -603,6 +607,15 @@ class CrewOverlay implements Component {
 
 	handleInput(data: string): void {
 		const rows = buildRows(this.#state(process.stdout.columns ?? 100));
+		// CREW_DEBUG_KEYS=1 shows the raw bytes of the last key the overlay was
+		// handed. A key that is being eaten upstream leaves this line unchanged —
+		// which is the whole diagnostic: "nothing happened" and "crew never saw it"
+		// look identical from the outside, and this tells them apart.
+		if (DEBUG_KEYS) {
+			this.#lastKey = `${[...data].map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" ")}  (${JSON.stringify(data)})`;
+			this.#keyCount++;
+			this.tui.requestRender();
+		}
 
 		if (data === "\x1b" || data === "q" || data === "\x03") {
 			this.done(undefined);
@@ -683,6 +696,7 @@ class CrewOverlay implements Component {
 			// Two keystrokes, and the footer says so rather than implying one: the
 			// first leaves crew, the second reaches omp's hub for attach/kill/message.
 			dim("ctrl+s / alt+a: leave crew, then press it again for omp's hub"),
+			...(DEBUG_KEYS ? [yellow(`debug: key #${this.#keyCount} = ${this.#lastKey}`)] : []),
 		];
 	}
 
