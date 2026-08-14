@@ -45,10 +45,11 @@ const refs: any[] = [
   { id: "root-e", displayName: "no-output", kind: "sub", parentId: "Main", status: "idle", createdAt: 7 },
   { id: "root-f", displayName: "missing-file", kind: "sub", parentId: "Main", status: "idle",
     createdAt: 8, history: { outputPath: path.join(tmp, "does-not-exist.md") } },
-  // must NOT appear: advisor, main, parked, aborted
+  // must NOT appear: advisor, main, aborted. parked DOES appear — it is alive.
   { id: "adv", displayName: "advisor", kind: "advisor", parentId: "Main", status: "running", createdAt: 9 },
   { id: "main", displayName: "you", kind: "main", status: "running", createdAt: 0 },
   { id: "parked", displayName: "parked-one", kind: "sub", parentId: "Main", status: "parked", createdAt: 10 },
+  { id: "dead", displayName: "dead-one", kind: "sub", parentId: "Main", status: "aborted", createdAt: 11 },
 ];
 
 const registry = {
@@ -250,34 +251,24 @@ const show = (title: string, lines: readonly string[]) => {
   console.log("alt+a on a non-agent row:", notices);
 }
 
-// ── 3e. `s` interrupts the turn without tombstoning the agent ────────────────
+// ── 3e. parked agents stay visible; aborted ones do not ─────────────────────
+// omp parks an idle agent after task.agentIdleTtlMs (7 min default). A
+// running|idle filter made it silently vanish while still alive and revivable.
 {
-  notices.length = 0;
-  let abortedWith: any = "NOT CALLED";
-  refs[0].session.abort = async (opts: any) => { abortedWith = opts; };
+  refs.push({ id: "root-g", displayName: "parked-alive", kind: "sub", parentId: "Main",
+              status: "parked", createdAt: 11 });
+  refs.push({ id: "root-h", displayName: "really-aborted", kind: "sub", parentId: "Main",
+              status: "aborted", createdAt: 12 });
   const api = makeApi();
   ompCrew(api as any);
-  keyScript = ["j", "s"]; // cursor onto the running `implement`, then stop
+  keyScript = [];
   const ctx = makeCtx();
   await handlers.shortcut(ctx).catch(() => {});
-  await Bun.sleep(30);
-  console.log("\n══ 3e. `s` stop ══════════════════════════════════════════════");
-  console.log("session.abort called with:", abortedWith);
-  console.log("reason is omp's exact user-interrupt string:",
-    abortedWith?.reason === "Interrupted by user");
-  console.log("notices:", notices);
-  console.log("still listed after stop:", refs.some(r => r.id === "root-a"));
-}
-{
-  // an idle row must refuse rather than pretend
-  notices.length = 0;
-  const api = makeApi();
-  ompCrew(api as any);
-  keyScript = ["j", "j", "j", "s"]; // onto an idle row
-  const ctx = makeCtx();
-  await handlers.shortcut(ctx).catch(() => {});
-  await Bun.sleep(30);
-  console.log("`s` on a non-running row:", notices.length === 0 ? "ignored (no action)" : notices);
+  const text = lastRender.join("\n");
+  console.log("\n══ 3e. parked vs aborted ═════════════════════════════════════");
+  console.log(`  ${text.includes("parked-alive") ? "ok  " : "FAIL"} parked agent is still shown`);
+  console.log(`  ${!text.includes("really-aborted") ? "ok  " : "FAIL"} aborted agent is hidden`);
+  refs.length = refs.length - 2;
 }
 
 // ── 4. registry missing → tombstone ──────────────────────────────────────────

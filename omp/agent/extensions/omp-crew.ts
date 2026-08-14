@@ -15,10 +15,10 @@
  * What it is NOT:
  *   Crew never renders a transcript and has no attach. omp's own agent hub
  *   (ctrl+s or alt+a, then Enter) attaches, kills, and messages; crew points at
- *   the agent and gets out of the way. Four verbs live here, and only because
- *   the hub cannot offer them: `n` dispatch, `f` feature, `o` output, and `s`
- *   stop — interrupt the current turn and leave the agent standing, which omp
- *   can do to your main session but to no subagent, from anywhere.
+ *   the agent and gets out of the way. Three verbs live here, and only because
+ *   the hub cannot offer them: `n` dispatch, `f` feature, `o` output. There is
+ *   deliberately no stop — see "Stopping an agent" below for why it cannot work
+ *   from here.
  *
  *   Handing off costs two keystrokes, not one, and that is structural: omp binds
  *   the hub on the editor, which sees no input while an extension overlay is
@@ -33,7 +33,7 @@
  *   the "new feature" picker remembers what you have been calling things.
  *   Nothing is ever written into your repository.
  *
- * Version note: verified against oh-my-pi v17.2.10. Everything crew needs comes
+ * Version note: verified against oh-my-pi v17.3.0. Everything crew needs comes
  * off `api.pi`, the package's own root barrel handed to extensions — but none of
  * it is part of the sanctioned ExtensionAPI, so every symbol is resolved
  * defensively and a missing one degrades loudly instead of killing the
@@ -226,6 +226,17 @@ async function rememberFeature(name: string): Promise<void> {
  * once it parks them at task.agentIdleTtlMs they leave the tree, and that TTL is
  * the only expiry crew has or wants.
  */
+/**
+ * The statuses worth showing. This is deliberately WIDER than omp's own
+ * `listVisibleTo` cut, which D5 originally copied: omp parks an idle agent
+ * after `task.agentIdleTtlMs` (7 minutes by default), and a `running`/`idle`
+ * filter makes it silently vanish from crew while it is still perfectly alive
+ * and revivable. A control plane whose rows disappear on a timer is worse than
+ * useless — it is misleading. Only `aborted` is genuinely dead, and only that
+ * is excluded.
+ */
+const ALIVE = new Set(["running", "idle", "parked"]);
+
 function visibleRefs(): AgentRef[] {
 	const reg = registry();
 	if (!reg) return [];
@@ -237,7 +248,7 @@ function visibleRefs(): AgentRef[] {
 	}
 	return all.filter(
 		// `main` is the session you are typing in — you are already looking at it.
-		r => r.kind !== "advisor" && r.kind !== "main" && (r.status === "running" || r.status === "idle"),
+		r => r.kind !== "advisor" && r.kind !== "main" && ALIVE.has(r.status),
 	);
 }
 
@@ -319,7 +330,8 @@ function flatten(value: unknown): string {
  * opens fired its event long before anyone was listening.
  */
 function summaryFor(ref: AgentRef, repaint: () => void): string | undefined {
-	if (ref.status !== "idle") return undefined;
+	// Parked agents kept their output file even though their session is gone.
+	if (ref.status === "running") return undefined;
 	const cached = summaryById.get(ref.id);
 	if (cached !== undefined) return cached;
 	if (summaryPending.has(ref.id)) return undefined;
@@ -380,7 +392,11 @@ function clip(s: string, width: number): string {
 const shortId = (id: string) => id.slice(-6);
 
 function glyph(ref: AgentRef): string {
-	return ref.status === "running" ? green("●") : grey("○");
+	if (ref.status === "running") return green("●");
+	// Parked reads as dimmer than idle: still revivable, but its session is gone
+	// and reaching it costs a revive rather than a prompt.
+	if (ref.status === "parked") return grey("◌");
+	return grey("○");
 }
 
 function spend(ref: AgentRef): string {
@@ -504,7 +520,6 @@ type Action =
 	| { type: "dispatch"; feature?: string; askFeature: boolean }
 	| { type: "feature"; agentId: string }
 	| { type: "open"; agentId: string }
-	| { type: "stop"; agentId: string }
 	| { type: "handoff"; agentId?: string };
 
 const DEBUG_KEYS = !!process.env.CREW_DEBUG_KEYS;
@@ -726,11 +741,6 @@ class CrewOverlay implements Component {
 		} else if (is("o")) {
 			const row = this.#selected(rows);
 			if (row?.kind === "agent") this.done({ type: "open", agentId: row.ref.id });
-		} else if (is("s")) {
-			const row = this.#selected(rows);
-			if (row?.kind === "agent" && row.ref.status === "running") {
-				this.done({ type: "stop", agentId: row.ref.id });
-			}
 		} else if (is("ctrl+s") || is("alt+a") || is("alt+c")) {
 			// omp binds its hub on the EDITOR (editor.setCustomKeyHandler), and while
 			// this overlay is mounted the editor sees nothing — so ctrl+s inside crew
@@ -783,7 +793,7 @@ class CrewOverlay implements Component {
 		return [
 			dim("─".repeat(Math.max(10, width))),
 			target,
-			dim(`enter collapse/expand · ${dispatchKey} · s stop · f feature · o output · esc close`),
+			dim(`enter collapse/expand · ${dispatchKey} · f feature · o output · esc close`),
 			// Two keystrokes, and the footer says so rather than implying one: the
 			// first leaves crew, the second reaches omp's hub for attach/kill/message.
 			dim("ctrl+s / alt+a: leave crew, then press it again for omp's hub"),
@@ -958,47 +968,27 @@ async function featureFlow(ctx: ExtensionCommandContext, agentId: string): Promi
 	void rememberFeature(feature);
 }
 
-/**
- * omp's own user-interrupt reason. This exact string is load-bearing, not a
- * label: `AgentSession.abort` compares against it to decide whether this was a
- * user interrupt, and only then inserts the interrupt marker, sets
- * `autoResumeSuppressed` so the agent does not carry on by itself, and restores
- * queued messages. Any other string aborts the turn but leaves the agent free to
- * resume — the opposite of what `s` is for.
- */
-const USER_INTERRUPT = "Interrupted by user";
-
-/**
- * Stop the current turn and leave the agent standing.
- *
- * This is deliberately NOT what omp's hub does. `x` there is
- * `session.abort()` *plus* `release(..., { tombstone: true })`, and the
- * tombstone is terminal: it stamps the registry entry `aborted` (a status
- * `setStatus` refuses to leave), detaches the session, and writes a marker that
- * survives restarts. Aborting without releasing cancels only the in-flight
- * turn — the entry lands on `idle` through the ordinary `agent_end` event, so
- * it stays listed, stays enterable, and takes a fresh prompt.
- */
-async function stopAgent(ctx: ExtensionCommandContext, agentId: string): Promise<void> {
-	const ref = registry()?.get(agentId);
-	if (!ref) return;
-	if (ref.status !== "running") {
-		ctx.ui.notify(`crew: ${ref.displayName} is not running`, "warning");
-		return;
-	}
-	if (!ref.session?.abort) {
-		// Running, but crew has no handle on it — a remote/collab-mirrored entry,
-		// or an omp whose session no longer exposes abort.
-		ctx.ui.notify(`crew: ${ref.displayName} has no session crew can stop — use ctrl+s`, "warning");
-		return;
-	}
-	try {
-		await ref.session.abort({ reason: USER_INTERRUPT });
-		ctx.ui.notify(`crew: stopped ${ref.displayName} — attach with ctrl+s to redirect it`, "info");
-	} catch (err) {
-		ctx.ui.notify(`crew: could not stop ${ref.displayName} — ${message(err)}`, "error");
-	}
-}
+// ── Stopping an agent: why there is no key for it ────────────────────────────
+// `s` existed here briefly and was removed, because interrupting a crew-
+// dispatched agent is not reachable from a registry entry. Recorded so nobody
+// (me included) re-derives it from the same wrong premises:
+//
+//   * `ref.session.abort()` does NOT stop the initial run. omp's executor loop
+//     watches its OWN AbortController, not the session's, so an aborted turn
+//     that never called `yield` just triggers a reminder prompt ("Last turn had
+//     no tool call… Reminder N of 3") and the agent carries on. One press does
+//     nothing visible; it takes four to exhaust the retries.
+//   * Once the loop does exit, the finalizer tombstones the agent. With no
+//     `signal` passed, `abortKind` is `undefined` — and `isAbortedRun()` counts
+//     `undefined` as aborted — so it calls `release(…, { tombstone: true })`
+//     for you: status `aborted` (terminal), session disposed, marker on disk.
+//   * Passing `signal` does not rescue this. It fails the finalizer's one
+//     escape hatch (`abortKind === "budget"`) and tombstones just the same.
+//
+// Abort is only safe on FOLLOW-UP turns, which run through
+// `runSubagentFollowUpTurn` and never reach that finalizer. Giving crew a real
+// stop therefore means changing how it dispatches, not adding a keybinding —
+// tracked as a decision on the wayfinder map, not patched in here.
 
 /** Opens the yield payload — the .md, not the raw .jsonl transcript, which is
  *  ctrl+s's job. Detached, so it costs omp nothing. */
@@ -1041,9 +1031,6 @@ async function showCrew(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
 				break;
 			case "open":
 				openOutput(ctx, action.agentId);
-				break;
-			case "stop":
-				await stopAgent(ctx, action.agentId);
 				break;
 			case "handoff": {
 				const ref = action.agentId ? registry()?.get(action.agentId) : undefined;
