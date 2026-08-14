@@ -196,6 +196,31 @@ const show = (title: string, lines: readonly string[]) => {
   show("3c. `f` on the nested `research` row regroups its ROOT (implement)", lastRender);
 }
 
+// ── 3d. ctrl+s inside crew hands off instead of being swallowed ──────────────
+// Regression: omp binds its hub on the editor, which is dark while this overlay
+// is mounted, so ctrl+s here used to do nothing at all.
+{
+  notices.length = 0;
+  const api = makeApi();
+  ompCrew(api as any);
+  keyScript = ["j", "\x13"]; // cursor onto `implement`, then ctrl+s
+  const ctx = makeCtx();
+  await handlers.shortcut(ctx).catch(() => {});
+  await Bun.sleep(30);
+  console.log("\n══ 3d. ctrl+s handoff ════════════════════════════════════════");
+  console.log("notices:", notices);
+}
+{
+  notices.length = 0;
+  const api = makeApi();
+  ompCrew(api as any);
+  keyScript = ["\x1ba"]; // alt+a on a header row — no agent named
+  const ctx = makeCtx();
+  await handlers.shortcut(ctx).catch(() => {});
+  await Bun.sleep(30);
+  console.log("alt+a on a non-agent row:", notices);
+}
+
 // ── 4. registry missing → tombstone ──────────────────────────────────────────
 {
   notices.length = 0;

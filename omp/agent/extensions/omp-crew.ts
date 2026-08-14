@@ -14,9 +14,15 @@
  *
  * What it is NOT:
  *   Crew never renders a transcript and has no attach. omp's own agent hub
- *   (ctrl+s → Enter) attaches, kills, and messages; crew points at the agent and
- *   gets out of the way. Only three verbs live here, and only because ctrl+s
- *   cannot offer them: `n` dispatch, `f` assign a feature, `o` open the output.
+ *   (ctrl+s or alt+a, then Enter) attaches, kills, and messages; crew points at
+ *   the agent and gets out of the way. Only three verbs live here, and only
+ *   because the hub cannot offer them: `n` dispatch, `f` feature, `o` output.
+ *
+ *   Handing off costs two keystrokes, not one, and that is structural: omp binds
+ *   the hub on the editor, which sees no input while an extension overlay is
+ *   mounted. So ctrl+s/alt+a inside crew closes crew and says what to press
+ *   next, rather than being silently swallowed — which is what it did until a
+ *   second machine caught it.
  *
  * State:
  *   In-memory only, for the lifetime of the process — the agent→feature mapping
@@ -492,7 +498,13 @@ function buildRows(state: TreeState): Row[] {
 type Action =
 	| { type: "dispatch"; feature?: string; askFeature: boolean }
 	| { type: "feature"; agentId: string }
-	| { type: "open"; agentId: string };
+	| { type: "open"; agentId: string }
+	| { type: "handoff"; agentId?: string };
+
+/** omp's two hub bindings, plus crew's own opener, as raw input. */
+const CTRL_S = "\x13";
+const ALT_A = "\x1ba";
+const ALT_C = "\x1bc";
 
 interface TUILike {
 	requestRender(): void;
@@ -615,6 +627,14 @@ class CrewOverlay implements Component {
 		} else if (data === "o") {
 			const row = this.#selected(rows);
 			if (row?.kind === "agent") this.done({ type: "open", agentId: row.ref.id });
+		} else if (data === CTRL_S || data === ALT_A || data === ALT_C) {
+			// omp binds its hub on the EDITOR (editor.setCustomKeyHandler), and while
+			// this overlay is mounted the editor sees nothing — so ctrl+s inside crew
+			// would otherwise be swallowed here and look broken. Crew cannot open the
+			// hub itself (R1/D1: showAgentHub is on a private controller), so the
+			// honest thing is to get out of the way and say what to press next.
+			const row = this.#selected(rows);
+			this.done({ type: "handoff", agentId: row?.kind === "agent" ? row.ref.id : undefined });
 		}
 	}
 
@@ -653,14 +673,16 @@ class CrewOverlay implements Component {
 	#footer(selected: SelectableRow | undefined, width: number): string[] {
 		const target =
 			selected?.kind === "agent"
-				? `${dim("ctrl+s target →")} ${bold(selected.ref.displayName)} ${dim(shortId(selected.ref.id))}`
-				: dim("ctrl+s target → (select an agent)");
+				? `${dim("attach →")} ${bold(selected.ref.displayName)} ${dim(shortId(selected.ref.id))}`
+				: dim("attach → (select an agent)");
 		const dispatchKey = breakage.dispatch ? red(`n unavailable (${breakage.dispatch})`) : "n new";
 		return [
 			dim("─".repeat(Math.max(10, width))),
 			target,
 			dim(`enter collapse/expand · ${dispatchKey} · f feature · o output · esc close`),
-			dim("ctrl+s: attach · kill · message"),
+			// Two keystrokes, and the footer says so rather than implying one: the
+			// first leaves crew, the second reaches omp's hub for attach/kill/message.
+			dim("ctrl+s / alt+a: leave crew, then press it again for omp's hub"),
 		];
 	}
 
@@ -851,6 +873,16 @@ async function showCrew(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
 			case "open":
 				openOutput(ctx, action.agentId);
 				break;
+			case "handoff": {
+				const ref = action.agentId ? registry()?.get(action.agentId) : undefined;
+				ctx.ui.notify(
+					ref
+						? `crew: closed — press ctrl+s (or alt+a) again for omp's hub, then pick ${ref.displayName}`
+						: "crew: closed — press ctrl+s (or alt+a) again for omp's hub",
+					"info",
+				);
+				return;
+			}
 		}
 	}
 }
