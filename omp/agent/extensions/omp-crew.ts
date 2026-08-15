@@ -15,10 +15,11 @@
  * What it is NOT:
  *   Crew never renders a transcript and has no attach. omp's own agent hub
  *   (ctrl+s or alt+a, then Enter) attaches, kills, and messages; crew points at
- *   the agent and gets out of the way. Three verbs live here, and only because
- *   the hub cannot offer them: `n` dispatch, `f` feature, `o` output. There is
- *   deliberately no stop — see "Stopping an agent" below for why it cannot work
- *   from here.
+ *   the agent and gets out of the way. Four verbs live here, and only because
+ *   the hub cannot offer them: `n` dispatch, `s` stop, `f` feature, `o` output.
+ *   `s` stops the turn without killing the agent — see "Dispatch" for the
+ *   handshake that makes that possible, and why it only fires on rows crew
+ *   dispatched in this process.
  *
  *   Handing off costs two keystrokes, not one, and that is structural: omp binds
  *   the hub on the editor, which sees no input while an extension overlay is
@@ -28,7 +29,8 @@
  *
  * State:
  *   In-memory only, for the lifetime of the process — the agent→feature mapping
- *   has the same lifetime as the registry it describes. The single persisted
+ *   and the agent→dispatch-phase mapping both have the same lifetime as the
+ *   registry they describe. The single persisted
  *   thing is the feature-name vocabulary at <agent-dir>/crew/features.json, so
  *   the "new feature" picker remembers what you have been calling things.
  *   Nothing is ever written into your repository.
@@ -91,6 +93,9 @@ interface Barrel {
 	VERSION?: string;
 	AgentRegistry?: { global(): Registry };
 	runSubprocess?: (opts: Record<string, unknown>) => Promise<unknown>;
+	/** The abortable turn. Resolves the session itself via ensureLive(id), so a
+	 *  parked agent revives and crew never holds a session reference. */
+	runSubagentFollowUpTurn?: (opts: Record<string, unknown>) => Promise<unknown>;
 	discoverAgents?: (cwd: string) => Promise<unknown>;
 	getAgentDir?: () => string;
 	settings?: unknown;
@@ -128,6 +133,26 @@ function resolveOmp(pi: ExtensionAPI): void {
 
 	if (typeof barrel.runSubprocess !== "function") breakage.dispatch = "runSubprocess";
 	if (typeof barrel.discoverAgents !== "function") breakage.dispatch = "discoverAgents";
+	// Dispatch is handshake-then-follow-up as a whole: without the follow-up turn
+	// crew can only manufacture one-shot agents nobody can steer, which is the
+	// thing this design exists to stop doing. So it degrades with the rest of
+	// dispatch rather than half-working.
+	if (typeof barrel.runSubagentFollowUpTurn !== "function") breakage.dispatch = "runSubagentFollowUpTurn";
+
+	// A summary cached off disk is only valid while the agent is not writing to
+	// it, and a follow-up turn rewrites the same path without touching history —
+	// so `metadata_changed` never fires for it. Keying the drop off the ref's own
+	// `status` instead of an event-type string keeps this honest: a running agent
+	// has no valid summary, whatever omp decided to call the event.
+	try {
+		registryRef?.onChange(event => {
+			const ref = event?.ref;
+			if (ref?.status === "running") invalidateSummary(ref.id);
+		});
+	} catch {
+		// A registry that refuses listeners still lists; the render-time guard in
+		// summaryFor covers everything visible while the overlay is open.
+	}
 
 	// A resolved symbol whose contract moved underneath us is the failure a
 	// presence check cannot see. Majors only: a patch-level nag becomes noise
@@ -163,6 +188,39 @@ const featureById = new Map<string, string>();
 /** agentId → derived one-line result summary. Read from disk once per agent. */
 const summaryById = new Map<string, string>();
 const summaryPending = new Set<string>();
+
+/**
+ * What crew knows about an agent it dispatched, and only about those. Same
+ * lifetime as featureById and for the same reason — and here the conservatism is
+ * load-bearing rather than tidy: after a restart crew cannot prove an agent is
+ * mid-follow-up rather than mid-one-shot, and guessing wrong tombstones it.
+ *
+ *   handshake  the one-shot run is still going. `s` here is the dangerous press:
+ *              it cannot interrupt that loop, and the fourth one kills the agent.
+ *   steerable  the follow-up turn is live and owns an AbortController we hold.
+ *   stopped    crew aborted that turn. The controller is spent; any further turn
+ *              belongs to omp's hub.
+ *   released   a turn started after we stopped one, so the row is somebody
+ *              else's now — the summary goes back to being read off disk.
+ */
+type Phase = "handshake" | "steerable" | "stopped" | "released";
+
+interface Dispatch {
+	phase: Phase;
+	agentName: string;
+	/** The follow-up turn's own controller — the only abort that does not tombstone. */
+	controller?: AbortController;
+}
+
+const dispatchById = new Map<string, Dispatch>();
+
+function invalidateSummary(id: string): void {
+	summaryById.delete(id);
+	const d = dispatchById.get(id);
+	// A fresh turn overwrites the file crew's `(stopped)` marker stood in for, so
+	// the marker has to expire with it or the row lies about a turn crew never saw.
+	if (d?.phase === "stopped") d.phase = "released";
+}
 
 const UNGROUPED = "(no feature)";
 const NEW_FEATURE = "＋ new feature…";
@@ -331,7 +389,22 @@ function flatten(value: unknown): string {
  */
 function summaryFor(ref: AgentRef, repaint: () => void): string | undefined {
 	// Parked agents kept their output file even though their session is gone.
-	if (ref.status === "running") return undefined;
+	if (ref.status === "running") {
+		// Backstop for the onChange subscription, not a substitute: this only fires
+		// if a render happens to land while the turn is running.
+		invalidateSummary(ref.id);
+		return undefined;
+	}
+	// Derived, never cached — a cached marker would be wiped by the very
+	// invalidation that has to keep running for the row's next turn.
+	const phase = dispatchById.get(ref.id)?.phase;
+	if (phase === "stopped") return "(stopped)";
+	// The gap between the handshake yielding and the real task landing is
+	// milliseconds wide, but what is on disk in it is the word "ready", which
+	// would read as a result. Say what it actually is. (`steerable` while not
+	// running is the same gap, seen a moment later: the turn is sent but has not
+	// flipped the status yet. Once it ends, the phase is `released`.)
+	if (phase === "handshake" || phase === "steerable") return "(starting…)";
 	const cached = summaryById.get(ref.id);
 	if (cached !== undefined) return cached;
 	if (summaryPending.has(ref.id)) return undefined;
@@ -519,6 +592,7 @@ function buildRows(state: TreeState): Row[] {
 type Action =
 	| { type: "dispatch"; feature?: string; askFeature: boolean }
 	| { type: "feature"; agentId: string }
+	| { type: "stop"; agentId: string }
 	| { type: "open"; agentId: string }
 	| { type: "handoff"; agentId?: string };
 
@@ -749,6 +823,15 @@ class CrewOverlay implements Component {
 			// honest thing is to get out of the way and say what to press next.
 			const row = this.#selected(rows);
 			this.done({ type: "handoff", agentId: row?.kind === "agent" ? row.ref.id : undefined });
+			} else if (is("s")) {
+				// Deliberately tested AFTER ctrl+s: for any correct matcher the two are
+				// disjoint, and in this order a sloppy one costs a missed stop rather
+				// than a stop fired by the handoff key.
+				const row = this.#selected(rows);
+				// Every eligibility question — and every refusal — lives in stopFlow,
+				// which has the ctx needed to say no out loud. The overlay only names
+				// the row.
+				if (row?.kind === "agent") this.done({ type: "stop", agentId: row.ref.id });
 		}
 	}
 
@@ -790,13 +873,18 @@ class CrewOverlay implements Component {
 				? `${dim("attach →")} ${bold(selected.ref.displayName)} ${dim(shortId(selected.ref.id))}`
 				: dim("attach → (select an agent)");
 		const dispatchKey = breakage.dispatch ? red(`n unavailable (${breakage.dispatch})`) : "n new";
+		// Lit only when it will actually fire. `s` refuses out loud on every other
+		// row, so this is a hint, not the gate — but a key that is live on one row
+		// in ten should look different on that row.
+		const stopKey = selected?.kind === "agent" && dispatchById.get(selected.ref.id)?.phase === "steerable" ? green("s stop") : "s stop";
 		return [
 			dim("─".repeat(Math.max(10, width))),
 			target,
-			dim(`enter collapse/expand · ${dispatchKey} · f feature · o output · esc close`),
+			dim(`enter collapse/expand · ${dispatchKey} · ${stopKey} · f feature · o output · esc close`),
 			// Two keystrokes, and the footer says so rather than implying one: the
-			// first leaves crew, the second reaches omp's hub for attach/kill/message.
-			dim("ctrl+s / alt+a: leave crew, then press it again for omp's hub"),
+			// first leaves crew, the second reaches omp's hub — which is where kill,
+			// message and the transcript live, and `s` is none of those.
+			dim("ctrl+s / alt+a: leave crew, then press it again for omp's hub (attach · kill · message)"),
 			...(DEBUG_KEYS ? [yellow(`debug: key #${this.#keyCount} = ${this.#lastKey}`)] : []),
 		];
 	}
@@ -900,14 +988,21 @@ async function dispatchFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext, acti
 	}
 
 	const dir = artifactsDir(ctx);
-	const run = barrel.runSubprocess?.({
+	// One index for both turns: it identifies the agent in omp's progress rows,
+	// and the two turns are one agent.
+	const index = nextIndex++;
+	dispatchById.set(id, { phase: "handshake", agentName: def.name });
+
+	const handshake = barrel.runSubprocess?.({
 		cwd,
 		// Resolved by name from omp's own discovery — the definition owns the
 		// model, the tools, and the prompt; crew adds nothing to it.
 		agent: def,
-		task,
+		// NOT the user's task. Turn one exists only to bring a session into being
+		// that later turns can be sent to and interrupted; see HANDSHAKE.
+		task: HANDSHAKE,
 		id,
-		index: nextIndex++,
+		index,
 		artifactsDir: dir,
 		// Cosmetic (hub progress rows), and runSubprocess calls .emit() on it — so
 		// pass it only if it actually is an emitter. It was previously handed
@@ -923,21 +1018,73 @@ async function dispatchFlow(pi: ExtensionAPI, ctx: ExtensionCommandContext, acti
 		keepAlive: true,
 		modelRegistry: (ctx as unknown as { modelRegistry?: unknown }).modelRegistry,
 		settings: barrel.settings,
-		// Deliberately no `signal`. It is the only external abort for the whole
-		// run, and wiring it to the main session would make crew's agents die
-		// whenever you interrupt your own turn — they are background work, not
-		// part of it. Stopping a turn is `s` (session.abort); killing outright
-		// stays with omp's hub `x`.
+		// Deliberately no `signal` on the handshake, and this is the crux of the
+		// whole redesign rather than a preference: runSubprocess's finalizer
+		// tombstones anything it reads as aborted, and `abortKind === undefined`
+		// counts. There is no safe way to interrupt turn one — which is exactly why
+		// turn one is made to be over in seconds and carry none of the real work.
 	});
 
 	// Fire-and-forget still has to answer for itself: an unhandled rejection here
 	// would be an agent that never appears and never explains why.
-	run?.catch((err: unknown) => {
-		featureById.delete(id);
-		ctx.ui.notify(`crew: ${def.name} failed to start — ${message(err)}`, "error");
-	});
+	handshake
+		?.then(() => sendTask(pi, ctx, { id, def, task, dir, index }))
+		.catch((err: unknown) => {
+			featureById.delete(id);
+			dispatchById.delete(id);
+			ctx.ui.notify(`crew: ${def.name} failed to start — ${message(err)}`, "error");
+		});
 
 	ctx.ui.notify(`crew: ${def.name} dispatched${feature ? ` on ${feature}` : ""}`, "info");
+}
+
+/**
+ * Turn two: the real task, on the one path that can be interrupted without
+ * killing the agent. `runSubagentFollowUpTurn` resolves the session itself via
+ * `ensureLive(id)` — so crew holds no session reference, and a parked agent is
+ * revived from its session file rather than being unreachable. It must be handed
+ * the SAME artifactsDir as the handshake: the output file is keyed by agent id,
+ * so this turn overwrites the handshake's `ready` in place, which is the only
+ * reason a crew-dispatched row ever shows a real summary.
+ */
+async function sendTask(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	{ id, def, task, dir, index }: { id: string; def: AgentDef; task: string; dir: string | undefined; index: number },
+): Promise<void> {
+	const entry = dispatchById.get(id);
+	if (!entry) return; // dispatch was already torn down — nothing to send to.
+
+	const controller = new AbortController();
+	entry.controller = controller;
+	entry.phase = "steerable";
+	// The handshake's `ready` is on disk under this id and is not a result.
+	invalidateSummary(id);
+
+	try {
+		await barrel.runSubagentFollowUpTurn?.({
+			id,
+			agent: def,
+			message: task,
+			description: `crew: ${def.name}`,
+			index,
+			signal: controller.signal,
+			eventBus: hasEmit(pi) ? (pi as unknown as { events: unknown }).events : undefined,
+			parentToolCallId: id,
+			artifactsDir: dir,
+		});
+	} catch (err) {
+		// An abort we asked for is not a failure, and the row already says
+		// "(stopped)" — anything else is.
+		if (dispatchById.get(id)?.phase !== "stopped") {
+			ctx.ui.notify(`crew: ${def.name} could not start its task — ${message(err)}`, "error");
+		}
+	} finally {
+		// The controller is spent either way. Leave a stop we issued visible;
+		// otherwise hand the row back to omp's hub.
+		const now = dispatchById.get(id);
+		if (now && now.phase !== "stopped") now.phase = "released";
+	}
 }
 
 async function featureFlow(ctx: ExtensionCommandContext, agentId: string): Promise<void> {
@@ -968,27 +1115,90 @@ async function featureFlow(ctx: ExtensionCommandContext, agentId: string): Promi
 	void rememberFeature(feature);
 }
 
-// ── Stopping an agent: why there is no key for it ────────────────────────────
-// `s` existed here briefly and was removed, because interrupting a crew-
-// dispatched agent is not reachable from a registry entry. Recorded so nobody
-// (me included) re-derives it from the same wrong premises:
+// ── Stopping a turn ──────────────────────────────────────────────────────────
+// `s` stops the turn an agent is in; it never kills the agent. That distinction
+// is the reason dispatch is two turns instead of one, and it is worth writing
+// down because the obvious implementation is wrong in a way that only shows up
+// four keypresses later:
 //
-//   * `ref.session.abort()` does NOT stop the initial run. omp's executor loop
-//     watches its OWN AbortController, not the session's, so an aborted turn
-//     that never called `yield` just triggers a reminder prompt ("Last turn had
-//     no tool call… Reminder N of 3") and the agent carries on. One press does
-//     nothing visible; it takes four to exhaust the retries.
-//   * Once the loop does exit, the finalizer tombstones the agent. With no
-//     `signal` passed, `abortKind` is `undefined` — and `isAbortedRun()` counts
-//     `undefined` as aborted — so it calls `release(…, { tombstone: true })`
-//     for you: status `aborted` (terminal), session disposed, marker on disk.
-//   * Passing `signal` does not rescue this. It fails the finalizer's one
-//     escape hatch (`abortKind === "budget"`) and tombstones just the same.
+//   * `ref.session.abort()` does NOT stop a `runSubprocess` run. omp's executor
+//     loop watches its OWN AbortController, not the session's, so an aborted
+//     turn that never called `yield` just triggers a reminder ("Last turn had no
+//     tool call… Reminder N of 3") and the agent carries on. Press one does
+//     nothing visible; press four exhausts the retries.
+//   * When that loop finally exits, the finalizer tombstones the agent:
+//     `abortKind === undefined` reads as an aborted run, so it calls
+//     `release(…, { tombstone: true })` — status `aborted` (terminal), session
+//     disposed. Passing `signal` does not rescue it; it just fails the one
+//     escape hatch (`abortKind === "budget"`) and tombstones anyway.
+//   * `ref.session.followUp()` is not the door either — it queues a message for
+//     the agent's next stop, runs no turn, and writes no output file.
 //
-// Abort is only safe on FOLLOW-UP turns, which run through
-// `runSubagentFollowUpTurn` and never reach that finalizer. Giving crew a real
-// stop therefore means changing how it dispatches, not adding a keybinding —
-// tracked as a decision on the wayfinder map, not patched in here.
+// `runSubagentFollowUpTurn` never reaches that finalizer: aborting it ends the
+// run `aborted: true` and leaves the registry entry at `idle`, revivable. So
+// crew's stop is exactly one thing — abort the controller it handed to that
+// call — and it fires only on an agent crew put into that state itself, in this
+// process. Everything else refuses out loud.
+
+/**
+ * Turn one. Deliberately not the user's task: its only job is to bring a live,
+ * re-promptable session into existence cheaply, so that every turn which does
+ * real work runs on the abortable path. The cost is one short model response —
+ * the system prompt, tool schemas and autoloaded skills are paid once here and
+ * are warm for the real task.
+ *
+ * The yield instruction mirrors the convention the agent definitions already
+ * carry (terminal string `type`, empty `result`), so the output file holds the
+ * literal word and not a JSON envelope. It gets overwritten by the next turn
+ * regardless; this just keeps the "(starting…)" window honest if it is read.
+ */
+const HANDSHAKE = [
+	"Do not begin any work, and do not use any tool other than `yield`.",
+	"",
+	"Your actual task arrives in the very next message. This turn is a handshake:",
+	"reply with the single word `ready` and nothing else, then call `yield` with a",
+	"terminal string type and an empty result (`type: \"summary\"`, `result: {}`).",
+	"",
+	"Do not read files, run commands, plan, or ask questions.",
+].join("\n");
+
+/**
+ * The eligibility rule, and the refusal for every row that fails it. A key that
+ * silently does nothing is the bug three commits went to fixing, so there is no
+ * path through here that returns without saying something.
+ */
+function stopFlow(ctx: ExtensionCommandContext, agentId: string): void {
+	const entry = dispatchById.get(agentId);
+	// The registry is the better name, but crew's own record outlives an entry
+	// that has been released — and a refusal that says "undefined" is not one.
+	const name = registry()?.get(agentId)?.displayName ?? entry?.agentName ?? agentId;
+	const hub = "ctrl+s → x kills it";
+
+	if (!entry || entry.phase === "released") {
+		// Covers main-session `task` spawns, an agent's own nested delegations, and
+		// everything that predates a crew restart. In every case crew cannot prove
+		// there is a follow-up turn to abort, and guessing wrong tombstones the
+		// agent — so it does not guess.
+		ctx.ui.notify(`crew: s only stops turns crew started this session — ${name} is not one. ${hub}.`, "warning");
+		return;
+	}
+	if (entry.phase === "handshake") {
+		// The dangerous window, and the tempting one: an agent that ignored the
+		// handshake and started inventing work looks exactly like an agent worth
+		// stopping. It is still inside the one-shot run, where `s` cannot help.
+		ctx.ui.notify(`crew: ${name} is still starting up — that turn cannot be interrupted, only killed. ${hub}.`, "warning");
+		return;
+	}
+	if (entry.phase === "stopped") {
+		ctx.ui.notify(`crew: crew already stopped ${name}'s turn — anything after it belongs to omp's hub. ctrl+s to attach.`, "warning");
+		return;
+	}
+
+	entry.phase = "stopped";
+	entry.controller?.abort();
+	entry.controller = undefined;
+	ctx.ui.notify(`crew: stopped ${name}'s turn — it stays alive. ctrl+s to attach and re-prompt it.`, "info");
+}
 
 /** Opens the yield payload — the .md, not the raw .jsonl transcript, which is
  *  ctrl+s's job. Detached, so it costs omp nothing. */
@@ -1028,6 +1238,9 @@ async function showCrew(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
 				break;
 			case "feature":
 				await featureFlow(ctx, action.agentId);
+				break;
+			case "stop":
+				stopFlow(ctx, action.agentId);
 				break;
 			case "open":
 				openOutput(ctx, action.agentId);
