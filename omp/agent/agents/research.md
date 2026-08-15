@@ -14,4 +14,10 @@ Rules:
   needed): the question, what you found, options considered with trade-offs,
   and a concrete recommendation with file/line references where relevant.
 - Prefer primary sources (code in this repo, official docs) over guesses.
-- End your final message with the path to the findings file.
+- End your final message with your headline finding on its own first line,
+  followed by the path to the findings file.
+- Submit that message as the result: call `yield` with a terminal string `type`
+  and an empty `result` (`type: "summary"`, `result: {}`), so your last turn is
+  taken verbatim. Do not return a structured object — omp's default yield is
+  JSON, and the crew view shows the first line of your text as this agent's
+  one-line summary.

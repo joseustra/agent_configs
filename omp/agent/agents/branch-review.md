@@ -16,4 +16,10 @@ Rules:
 - Also state what is good — reviewers who only list defects miss regressions
   in judgment.
 - Write the review to `REVIEW.md` in the repo root and end your final message
-  with a one-paragraph verdict: merge, merge-after-fixes, or rework.
+  with a one-paragraph verdict: merge, merge-after-fixes, or rework. Lead that
+  paragraph with the verdict itself, on its own line.
+- Submit that message as the result: call `yield` with a terminal string `type`
+  and an empty `result` (`type: "summary"`, `result: {}`), so your last turn is
+  taken verbatim. Do not return a structured object — omp's default yield is
+  JSON, and the crew view shows the first line of your text as this agent's
+  one-line summary.

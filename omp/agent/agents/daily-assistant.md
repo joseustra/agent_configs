@@ -46,4 +46,9 @@ path, never `../`.
 - Keep your replies short. This is a daily check-in, not a report: a handful of
   lines and the concrete next action.
 - End with what you changed — notes touched, tasks added or completed — and
-  anything you deliberately left alone.
+  anything you deliberately left alone, leading with a single line that says it.
+- Submit that message as the result: call `yield` with a terminal string `type`
+  and an empty `result` (`type: "summary"`, `result: {}`), so your last turn is
+  taken verbatim. Do not return a structured object — omp's default yield is
+  JSON, and the crew view shows the first line of your text as this agent's
+  one-line summary.

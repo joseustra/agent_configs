@@ -16,4 +16,9 @@ Rules:
 - If a plan or research document is referenced in the task, treat it as the
   spec and flag any deviation you had to make.
 - End your final message with a summary of changed files and the verification
-  results.
+  results, and lead it with one line that stands on its own.
+- Submit that message as the result: call `yield` with a terminal string `type`
+  and an empty `result` (`type: "summary"`, `result: {}`), so your last turn is
+  taken verbatim. Do not return a structured object — omp's default yield is
+  JSON, and the crew view shows the first line of your text as this agent's
+  one-line summary.

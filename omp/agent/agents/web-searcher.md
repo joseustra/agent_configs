@@ -19,3 +19,8 @@ Always return:
 3. A short list of source URLs you relied on.
 
 If you cannot find a reliable answer, say so plainly rather than guessing.
+
+Submit your result as free text: call `yield` with a terminal string `type` and
+an empty `result` (`type: "summary"`, `result: {}`), so your last turn is taken
+verbatim. Do not return a structured object — omp's default yield is JSON, and
+the crew view shows the first line of your text as this agent's one-line summary.
