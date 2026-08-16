@@ -59,6 +59,9 @@ const registry = {
 };
 
 let dispatched: any = null;
+let followedUp: any = null;
+/** Keeps an agent "mid-turn" so a test can press `s` at it. */
+let holdFollowUp = false;
 const makeApi = (over: Record<string, unknown> = {}) => ({
   setLabel: () => {},
   registerShortcut: (_k: string, o: any) => { handlers.shortcut = o.handler; },
@@ -69,6 +72,14 @@ const makeApi = (over: Record<string, unknown> = {}) => ({
     VERSION: "17.2.10",
     AgentRegistry: { global: () => registry },
     runSubprocess: async (opts: any) => { dispatched = opts; return {}; },
+    runSubagentFollowUpTurn: async (opts: any) => {
+      followedUp = opts;
+      if (!holdFollowUp) return {};
+      // Stay "mid-turn" until the signal crew handed us fires. That signal is the
+      // only thing about `s` this harness can observe: whether the abort reaches
+      // the turn, not whether omp then does the right thing with it.
+      return new Promise(r => opts.signal?.addEventListener?.("abort", () => r({ aborted: true })));
+    },
     discoverAgents: async () => ({ implement: { name: "implement", description: "builds things" },
                                    research: { name: "research", description: "reads things" } }),
     getAgentDir: () => agentDir,
@@ -149,7 +160,12 @@ const show = (title: string, lines: readonly string[]) => {
   show("2. after j/enter/j/j/enter (collapse + summary expand)", lastRender);
 }
 
-// ── 3. dispatch flow ─────────────────────────────────────────────────────────
+// ── 3. dispatch flow: handshake, then the real task ──────────────────────────
+// Two turns, not one. Turn 1 is a crew-authored handshake through runSubprocess
+// (unabortable, so it carries no work); turn 2 is the user's task through
+// runSubagentFollowUpTurn (abortable, so `s` can stop it). What matters here is
+// that they share an id and an artifactsDir — that is what makes the second
+// turn overwrite the handshake's `ready` instead of leaving it as the summary.
 {
   const api = makeApi();
   ompCrew(api as any);
@@ -158,12 +174,21 @@ const show = (title: string, lines: readonly string[]) => {
   await handlers.shortcut(ctx).catch(() => {});
   await Bun.sleep(30);
   console.log("\n══ 3. dispatch ═══════════════════════════════════════════════");
-  console.log("runSubprocess called with:", dispatched && {
-    agent: dispatched.agent?.name, task: dispatched.task, id: dispatched.id,
+  console.log("turn 1 — runSubprocess:", dispatched && {
+    agent: dispatched.agent?.name, id: dispatched.id,
     artifactsDir: dispatched.artifactsDir, eventBus: !!dispatched.eventBus,
     parentToolCallId: dispatched.parentToolCallId, hasSettings: !!dispatched.settings,
-    modelOverridePresent: "modelOverride" in dispatched,
+    signalPresent: "signal" in dispatched, // must be false: signal here tombstones
+    taskIsHandshake: /handshake/i.test(dispatched.task ?? ""),
   });
+  console.log("turn 2 — runSubagentFollowUpTurn:", followedUp && {
+    agent: followedUp.agent?.name, message: followedUp.message, id: followedUp.id,
+    artifactsDir: followedUp.artifactsDir, eventBus: !!followedUp.eventBus,
+    parentToolCallId: followedUp.parentToolCallId, hasSignal: !!followedUp.signal,
+  });
+  console.log(`  ${dispatched?.id === followedUp?.id ? "ok  " : "FAIL"} same agent id across both turns`);
+  console.log(`  ${dispatched?.artifactsDir === followedUp?.artifactsDir ? "ok  " : "FAIL"} same artifactsDir (turn 2 must overwrite turn 1's output)`);
+  console.log(`  ${dispatched?.index === followedUp?.index ? "ok  " : "FAIL"} same index`);
   console.log("features.json:", await Bun.file(path.join(agentDir, "crew", "features.json")).text().catch(() => "(none)"));
   console.log("notices:", notices.slice(-2));
 }
@@ -271,6 +296,77 @@ const show = (title: string, lines: readonly string[]) => {
   refs.length = refs.length - 2;
 }
 
+// ── 3f. `s` refuses on a row crew did not dispatch, out loud ─────────────────
+// The refusal is the feature. `s` on a one-shot agent cannot interrupt anything
+// and its fourth press tombstones — so every row crew cannot prove is mid
+// follow-up gets a notice, never a silent no-op.
+{
+  notices.length = 0;
+  const api = makeApi();
+  ompCrew(api as any);
+  keyScript = ["j", "s"]; // cursor onto `implement`, which crew never dispatched
+  const ctx = makeCtx();
+  await handlers.shortcut(ctx).catch(() => {});
+  await Bun.sleep(30);
+  console.log("\n══ 3f. `s` on a foreign row ══════════════════════════════════");
+  console.log(`  ${notices.length > 0 ? "ok  " : "FAIL"} said something rather than nothing`);
+  console.log("notices:", notices);
+}
+
+// ── 3g. `s` aborts the follow-up turn's own controller ───────────────────────
+// The one thing about stopping this harness CAN see: that the signal crew handed
+// runSubagentFollowUpTurn actually fires. Whether omp then leaves the agent idle
+// rather than tombstoned is a live-session question — R6 answered it, and no
+// fake registry can re-confirm it.
+{
+  notices.length = 0;
+  dispatched = null;
+  followedUp = null;
+  holdFollowUp = true;
+  const saved = refs.splice(0, refs.length);
+
+  const api = makeApi();
+  ompCrew(api as any);
+  keyScript = ["n"];
+  const dispatchCtx = makeCtx({ select: "implement", editor: "do the real work", input: "" });
+  await handlers.shortcut(dispatchCtx).catch(() => {});
+  await Bun.sleep(30);
+
+  let aborted = false;
+  followedUp?.signal?.addEventListener?.("abort", () => { aborted = true; });
+  // The agent crew just dispatched, now visible in the registry and mid-turn.
+  refs.push({ id: dispatched.id, displayName: "implement", kind: "sub", parentId: "Main",
+              status: "running", createdAt: 1, activity: "doing the real work" });
+
+  notices.length = 0;
+  keyScript = ["j", "s"]; // header → the agent row → stop
+  const stopCtx = makeCtx();
+  await handlers.shortcut(stopCtx).catch(() => {});
+  await Bun.sleep(30);
+
+  console.log("\n══ 3g. `s` stops the follow-up turn ══════════════════════════");
+  console.log(`  ${aborted ? "ok  " : "FAIL"} the follow-up turn's signal fired`);
+  console.log("notices:", notices);
+
+  // and the row now reads (stopped), not the handshake's `ready`
+  refs[0].status = "idle";
+  refs[0].history = { outputPath: await out(dispatched.id, "ready") };
+  keyScript = [];
+  await handlers.shortcut(makeCtx()).catch(() => {});
+  const text = lastRender.join("\n");
+  console.log(`  ${text.includes("(stopped)") ? "ok  " : "FAIL"} row reads (stopped), not the handshake's stale "ready"`);
+
+  // pressing it again refuses rather than pretending
+  notices.length = 0;
+  keyScript = ["j", "s"];
+  await handlers.shortcut(makeCtx()).catch(() => {});
+  await Bun.sleep(10);
+  console.log("second press:", notices);
+
+  holdFollowUp = false;
+  refs.splice(0, refs.length, ...saved);
+}
+
 // ── 4. registry missing → tombstone ──────────────────────────────────────────
 {
   notices.length = 0;
@@ -294,6 +390,22 @@ const show = (title: string, lines: readonly string[]) => {
   keyScript = ["n", "\x1b"];
   await handlers.shortcut(ctx).catch(() => {});
   show("5. tree still works, n visibly broken", lastRender.slice(-5));
+  console.log("notices:", notices);
+}
+
+// ── 5b. runSubagentFollowUpTurn missing → dispatch degrades with it ──────────
+// Not a partial degradation: without the abortable turn crew could only produce
+// one-shot agents nobody can steer, which is the thing this design exists to
+// stop doing. So it fails with the rest of dispatch rather than half-working.
+{
+  notices.length = 0;
+  const api = makeApi({ runSubagentFollowUpTurn: undefined });
+  ompCrew(api as any);
+  const ctx = makeCtx();
+  await handlers.session_start({}, ctx);
+  keyScript = ["n", "\x1b"];
+  await handlers.shortcut(ctx).catch(() => {});
+  show("5b. n names the missing symbol", lastRender.slice(-5));
   console.log("notices:", notices);
 }
 
