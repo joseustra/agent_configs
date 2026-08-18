@@ -21,7 +21,9 @@
  *
  * The boundary is the SESSION ROOT (`ctx.cwd`, pinned at first use). Inside it the agent
  * is free, because git plus the snapshot below is the backup. Outside it, or wherever the
- * command can't be statically pinned to a location, it asks. This replaces the old
+ * command can't be statically pinned to a location, it asks — with the system temp dir
+ * (see TEMP_ROOTS) as the one other free zone, since it holds nothing worth restoring.
+ * This replaces the old
  * "list every disposable build directory" approach — no `_build`/`node_modules` allowlist
  * to maintain, and it generalises to paths that list never covered.
  *
@@ -56,6 +58,16 @@ const VCS_DIRS = new Set([".git", ".jj", ".hg", ".svn", ".worktrees"]);
 
 /** Unrecoverable-by-git files: git isn't backing them up, so deletion is forever. */
 const UNBACKED_FILE = /^\.env(\.[\w.-]+)?$|\.(?:pem|key|p12|pfx)$|^\.netrc$|^\.pgpass$/;
+
+/**
+ * Scratch roots outside the session root that the agent is free inside anyway: nothing
+ * here is meant to survive, so a prompt buys nothing. Both spellings are resolved through
+ * symlinks at load, because every operand the guard judges is resolved too — on macOS
+ * `/tmp` IS `/private/tmp`, so that is the string the comparison actually sees, and a
+ * literal "/tmp" entry alone would match none of it. `$TMPDIR` is deliberately NOT here:
+ * on macOS it is a per-user `/var/folders/…` tree that also hosts real scratch workspaces.
+ */
+const TEMP_ROOTS: string[] = [...new Set(["/tmp", "/private/tmp"].map(realpathDeep))];
 
 /**
  * Write a `refs/danger-guard/<ts>` snapshot commit before allowing a destructive command.
@@ -133,6 +145,14 @@ const inside = (p: string, root: string): boolean => p === root || p.startsWith(
 const touchesVcs = (p: string): boolean => p.split(sep).some((c) => VCS_DIRS.has(c));
 
 /**
+ * The temp roots that count as free for THIS session. Temp is only free while the
+ * workspace lives elsewhere: with a session root inside /tmp — a scratch clone, a
+ * worktree — the relaxation would swallow the workspace boundary whole and hand the
+ * agent every sibling directory, so for that root it switches itself off.
+ */
+const tempRoots = (root: string): string[] => TEMP_ROOTS.filter((t) => !inside(root, t));
+
+/**
  * The verdict for one path a command is about to destroy or overwrite.
  *
  * `scope: true` marks a path that is a SEARCH ROOT rather than a delete target —
@@ -144,7 +164,11 @@ function classifyTarget(p: string | null, root: string, what: string, scope = fa
   if (p === null) return confirm(`${what} a path that can't be resolved statically`);
   if (touchesVcs(p)) return block(`${what} version-control metadata (${basename(p)}) — the backup itself`);
   if (p === "/" || p === homedir()) return block(`${what} ${p}`);
-  if (!inside(p, root)) return confirm(`${what} outside the workspace: ${p}`);
+  const temps = tempRoots(root);
+  // The temp root itself is shared with every other process on the machine, so wiping it
+  // asks — exactly like the workspace root below.
+  if (temps.includes(p) && !scope) return confirm(`${what} the shared temp root itself: ${p}`);
+  if (!inside(p, root) && !temps.some((t) => inside(p, t))) return confirm(`${what} outside the workspace: ${p}`);
   if (p === root && !scope) return confirm(`${what} the workspace root itself`);
   if (UNBACKED_FILE.test(basename(p))) return confirm(`${what} ${basename(p)} — gitignored, so git can't restore it`);
   return ALLOW;
@@ -485,7 +509,8 @@ function decideFileTool(input: unknown, root: string): Verdict {
   if (typeof raw !== "string" || !raw) return ALLOW;
   const p = realpathDeep(isAbsolute(raw) ? normalize(raw) : resolve(root, raw));
   if (touchesVcs(p)) return block(`writing into version-control metadata (${basename(p)})`);
-  if (!inside(p, root)) return confirm(`writes outside the workspace: ${p}`);
+  if (!inside(p, root) && !tempRoots(root).some((t) => inside(p, t)))
+    return confirm(`writes outside the workspace: ${p}`);
   return ALLOW;
 }
 
