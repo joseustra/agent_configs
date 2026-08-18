@@ -117,14 +117,28 @@ table("escaping the workspace asks", [
   ["rm -rf /etc/hosts", "confirm"],
   ["rm -rf ~/Documents", "confirm"],
   ["rm -rf ../elsewhere", "confirm"],
-  ["cd /tmp && rm -rf junk", "confirm"],
   ["rm -rf escape/data", "confirm"], // symlink out of the workspace is followed
   ["rm -rf $TARGET", "confirm"],
   ["rm -rf `cat list`", "confirm"],
   ["echo x > /etc/profile", "confirm"],
-  ["mv src/a.ts /tmp/a.ts", "confirm"],
   ["rm -rf", "confirm"],
   ["cat list | xargs rm", "confirm"], // no upstream path evidence
+]);
+
+// Both spellings of the same directory: on macOS `/tmp` is a symlink to `/private/tmp`,
+// so the resolved path — the one the guard compares — is the `/private` one, and that is
+// what shows up when the agent runs the command for real.
+table("the system temp dir is free too", [
+  ["rm -rf /tmp/scratch", "allow"],
+  ["rm -rf /private/tmp/scratch", "allow"],
+  ["cd /tmp && rm -rf junk", "allow"],
+  ["cd /private/tmp && rm -rf junk", "allow"],
+  ["mv src/a.ts /tmp/a.ts", "allow"],
+  ["echo x > /private/tmp/out.log", "allow"],
+  ["rm -rf /tmp", "confirm"], // shared with every other process on the machine
+  ["rm -rf /private/tmp", "confirm"],
+  ["rm -rf /tmp/clone/.git", "block"], // the backup is untouchable wherever it lives
+  ["rm /private/tmp/id.pem", "confirm"], // still nothing that can restore it
 ]);
 
 table("catastrophic", [
@@ -177,6 +191,21 @@ describe("write/edit tools share the boundary", () => {
   });
   test("into .git", () => {
     expect(decideFileTool({ path: join(ROOT, ".git/config") }, ROOT).level).toBe("block");
+  });
+  test("into the system temp dir", () => {
+    expect(decideFileTool({ path: "/tmp/note.md" }, ROOT).level).toBe("allow");
+    expect(decideFileTool({ path: "/private/tmp/note.md" }, ROOT).level).toBe("allow");
+  });
+});
+
+// Otherwise a scratch clone or worktree under /tmp would have no boundary left at all:
+// every sibling in the temp dir would read as "free".
+describe("a workspace that lives in temp keeps its boundary", () => {
+  test("siblings of a temp-rooted workspace still ask", () => {
+    const tmpRoot = realpathSync("/tmp");
+    const root = join(tmpRoot, "proj");
+    expect(decideBash(`rm -rf ${join(tmpRoot, "other")}`, root).verdict.level).toBe("confirm");
+    expect(decideBash("rm -rf sub", root).verdict.level).toBe("allow");
   });
 });
 
