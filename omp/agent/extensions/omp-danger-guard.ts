@@ -82,6 +82,280 @@ const RANK = { allow: 0, confirm: 1, block: 2 } as const;
 const worst = (verdicts: Verdict[]): Verdict =>
   verdicts.reduce((a, b) => (RANK[b.level] > RANK[a.level] ? b : a), ALLOW);
 
+// ── Shell lexing ─────────────────────────────────────────────────────────────
+//
+// The guard used to split on /\n|;|&&|\|\||[|&]/ and slice operands on whitespace.
+// Neither sees quotes, and both failed in the same direction — reading prose as shell:
+//
+//   git commit -m "fix; rm -rf /"        -> a phantom `rm -rf /` segment  (confirm)
+//   git commit -m "use mkfs to format"   -> the mkfs BLOCK rule           (refused!)
+//
+// A false BLOCK is the worst outcome this design can produce, because block is
+// deliberately the one tier with no dialog to click through. So the lexer is not a
+// nicety; it is what makes the block tier safe to keep sharp.
+//
+// It stays IN THIS FILE rather than becoming a tree-sitter dependency: `manifest`
+// symlinks this single .ts into place and the devcontainer bind-mounts that same one
+// file, so the guard has no package.json to hang a dependency on. See the note in
+// `lex` for why an AST would buy nothing here anyway.
+
+/** One operand of a segment, already unquoted. */
+type Word = {
+  /** The literal value, with quotes and escapes resolved. */
+  text: string;
+  /** An unquoted `$` or backtick: the value is unknowable, so it can never be vouched for. */
+  expands: boolean;
+  /** This word is the destination of an output redirect (`>` / `>>`). */
+  redirect: boolean;
+};
+
+/** Chars that end a word but are not themselves operands. */
+const isSpace = (c: string): boolean => c === " " || c === "\t";
+
+/**
+ * Split a command into segments of words, honouring quotes, escapes, comments,
+ * `$(…)`/backtick substitution, subshells and redirects.
+ *
+ * A substitution body is absorbed into the surrounding word and flagged `expands`
+ * rather than being descended into. That is the whole reason a tree-sitter AST would
+ * add nothing here: the guard's answer to "I cannot see this value" is already CONFIRM,
+ * so a richer parse of an unknowable operand cannot change any verdict. What it needed
+ * was to stop mistaking quoted text for syntax, and that is a lexing problem.
+ */
+type Lexed = {
+  segments: Array<{ text: string; words: Word[] }>;
+  /**
+   * The command with the CONTENTS of quoted runs and heredoc bodies blanked to spaces,
+   * byte-for-byte identical otherwise. The regex tiers read shell SYNTAX; a commit
+   * message and a heredoc body are not shell syntax, and the rules have no way to tell
+   * on a raw string. Masking lets every rule keep working exactly as written while
+   * losing its ability to fire on prose. `secretVerdict` deliberately reads the RAW
+   * command instead — a quoted path is still a path.
+   */
+  masked: string;
+};
+
+function lex(command: string): Lexed {
+  const segs: Array<{ text: string; words: Word[] }> = [];
+  let words: Word[] = [];
+  let segStart = 0;
+
+  const mask = [...command];
+  const blank = (from: number, to: number) => {
+    for (let k = from; k < to && k < mask.length; k++) if (mask[k] !== "\n") mask[k] = " ";
+  };
+
+  let buf = "";
+  let open = false; // a word is in progress (possibly empty, e.g. `""`)
+  let expands = false;
+  let redirect = false;
+  /** Delimiters of heredocs opened on the current line, awaiting their bodies. */
+  const heredocs: string[] = [];
+
+  const pushWord = () => {
+    if (!open) return;
+    words.push({ text: buf, expands, redirect });
+    buf = "";
+    open = false;
+    expands = false;
+    redirect = false;
+  };
+  const pushSeg = (end: number) => {
+    pushWord();
+    if (words.length) segs.push({ text: command.slice(segStart, end).trim(), words });
+    words = [];
+  };
+
+  let i = 0;
+  const n = command.length;
+  while (i < n) {
+    const c = command[i];
+
+    // Comment: only at the start of a word, as in a real shell.
+    if (c === "#" && !open) {
+      while (i < n && command[i] !== "\n") i++;
+      continue;
+    }
+
+    if (isSpace(c)) {
+      pushWord();
+      i++;
+      continue;
+    }
+
+    // Segment separators. `(`/`)` and a standalone `{`/`}` split too, matching the old
+    // behaviour of stripping them: a subshell's contents get judged on their own.
+    if (c === "\n") {
+      pushSeg(i);
+      i++;
+      // A heredoc body is DATA the command reads on stdin, not shell to be judged.
+      // Left in, `cat <<EOF … mkfs … EOF` tripped a BLOCK rule on documentation.
+      if (heredocs.length) {
+        const bodyStart = i;
+        while (heredocs.length) {
+          const delim = heredocs.shift()!;
+          for (;;) {
+            const nl = command.indexOf("\n", i);
+            if (nl === -1) {
+              i = n;
+              break;
+            }
+            const line = command.slice(i, nl).trim();
+            i = nl + 1;
+            if (line === delim) break;
+          }
+        }
+        blank(bodyStart, i);
+      }
+      segStart = i;
+      continue;
+    }
+    if (c === ";" || c === "(" || c === ")") {
+      pushSeg(i);
+      i += 1;
+      segStart = i;
+      continue;
+    }
+    if ((c === "{" || c === "}") && !open && (i + 1 >= n || isSpace(command[i + 1]) || command[i + 1] === ";")) {
+      pushSeg(i);
+      i += 1;
+      segStart = i;
+      continue;
+    }
+    if (c === "&" || c === "|") {
+      const two = command.slice(i, i + 2);
+      pushSeg(i);
+      i += two === "&&" || two === "||" || two === "|&" ? 2 : 1;
+      segStart = i;
+      continue;
+    }
+
+    // Redirects. `2>&1` names no file, and a leading fd digit is not an operand.
+    if (c === ">" || c === "<") {
+      if (open && /^\d+$/.test(buf)) {
+        buf = "";
+        open = false;
+      }
+      pushWord();
+
+      // Heredoc `<<WORD` / `<<-WORD` / `<<'WORD'`. (`<<<` is a here-STRING: the
+      // delimiter scan below rejects `<`, so it falls through to normal redirect.)
+      if (c === "<" && command[i + 1] === "<") {
+        let j = i + 2;
+        if (command[j] === "-") j++;
+        while (j < n && isSpace(command[j])) j++;
+        const q = command[j] === "'" || command[j] === '"' ? command[j++] : "";
+        let delim = "";
+        while (j < n && (q ? command[j] !== q : /[\w.-]/.test(command[j]))) delim += command[j++];
+        if (q && command[j] === q) j++;
+        if (delim) {
+          heredocs.push(delim);
+          i = j;
+          continue;
+        }
+      }
+
+      let j = i;
+      while (j < n && (command[j] === ">" || command[j] === "<")) j++;
+      let k = j;
+      while (k < n && isSpace(command[k])) k++;
+      if (command[k] === "&") {
+        k++;
+        while (k < n && /[\d-]/.test(command[k])) k++;
+        i = k;
+        continue;
+      }
+      if (command[k] === "(") {
+        i = j; // process substitution — let the `(` split it
+        continue;
+      }
+      i = j;
+      if (c === ">") {
+        // Mark the NEXT word; `redirect` is cleared by pushWord, so set it after the
+        // intervening spaces are consumed.
+        while (i < n && isSpace(command[i])) i++;
+        open = true;
+        redirect = true;
+      }
+      continue;
+    }
+
+    // Quoting.
+    if (c === "'") {
+      open = true;
+      i++;
+      const from = i;
+      while (i < n && command[i] !== "'") buf += command[i++];
+      blank(from, i);
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      open = true;
+      i++;
+      const from = i;
+      while (i < n && command[i] !== '"') {
+        if (command[i] === "\\" && i + 1 < n) {
+          buf += command[i + 1];
+          i += 2;
+          continue;
+        }
+        if (command[i] === "$" || command[i] === "`") expands = true;
+        buf += command[i++];
+      }
+      blank(from, i);
+      i++;
+      continue;
+    }
+    if (c === "\\") {
+      open = true;
+      if (i + 1 < n) buf += command[i + 1];
+      i += 2;
+      continue;
+    }
+
+    // Substitution: absorbed whole, so its `;` and `&&` cannot split the outer command.
+    if (c === "$" && command[i + 1] === "(") {
+      open = true;
+      expands = true;
+      let depth = 0;
+      let j = i + 1;
+      for (; j < n; j++) {
+        if (command[j] === "(") depth++;
+        else if (command[j] === ")" && --depth === 0) {
+          j++;
+          break;
+        }
+      }
+      buf += command.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (c === "`") {
+      open = true;
+      expands = true;
+      let j = i + 1;
+      while (j < n && command[j] !== "`") j++;
+      buf += command.slice(i, Math.min(j + 1, n));
+      i = j + 1;
+      continue;
+    }
+    if (c === "$") {
+      open = true;
+      expands = true;
+      buf += c;
+      i++;
+      continue;
+    }
+
+    open = true;
+    buf += c;
+    i++;
+  }
+  pushSeg(n);
+  return { segments: segs, masked: mask.join("") };
+}
+
 // ── Path resolution ──────────────────────────────────────────────────────────
 
 const GLOB_CHARS = /[*?[\]{}]/;
@@ -107,10 +381,12 @@ function realpathDeep(p: string): string {
  * pinned down: shell expansion, command substitution, another user's home, or a glob that
  * could match dotfiles (and therefore `.git`). null always means CONFIRM, never ALLOW.
  */
-function resolveOperand(arg: string, base: string): string | null {
-  let a = arg.trim().replace(/^(['"])([\s\S]*)\1$/, "$2");
+function resolveOperand(w: Word, base: string): string | null {
+  let a = w.text.trim();
   if (!a || a.startsWith("-")) return null;
-  if (/[$`]/.test(a)) return null;
+  // Quoting is already resolved by the lexer, so `'$HOME'` is a literal filename and
+  // resolves fine; only a LIVE expansion is unknowable.
+  if (w.expands) return null;
 
   if (a === "~") a = homedir();
   else if (a.startsWith("~/")) a = homedir() + a.slice(1);
@@ -152,55 +428,86 @@ function classifyTarget(p: string | null, root: string, what: string, scope = fa
 
 // ── Command decomposition ────────────────────────────────────────────────────
 
-type Segment = { text: string; base: string };
+type Segment = { text: string; base: string; words: Word[] };
+
+/** A leading `FOO=bar` assignment prefix is not the command word. */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/** Words of a segment with any `FOO=bar` prefix dropped, so `words[0]` is the command. */
+function commandWords(words: Word[]): Word[] {
+  let i = 0;
+  while (i < words.length && !words[i].redirect && ASSIGNMENT.test(words[i].text)) i++;
+  return words.slice(i);
+}
 
 /**
  * Shell segments, tracking `cd` so `cd sub && rm x` resolves against `sub`. Returns null
  * when a `cd` lands somewhere unknowable — nothing after it can be judged.
  */
-function segmentize(command: string, root: string): Segment[] | null {
+function segmentize(lexed: Lexed, root: string): Segment[] | null {
   const out: Segment[] = [];
   let base = root;
-  for (const raw of command.split(/\n|;|&&|\|\||[|&]/)) {
-    const text = raw.trim().replace(/^[({\s]+/, "").replace(/[)}\s]+$/, "");
-    if (!text) continue;
-    const cd = /^(?:cd|pushd)\s+(\S+)/.exec(text);
-    if (cd) {
-      const target = resolveOperand(cd[1], base);
+  for (const seg of lexed.segments) {
+    const words = commandWords(seg.words);
+    if (!words.length) continue;
+    const head = words[0].text;
+    if (head === "cd" || head === "pushd") {
+      const arg = words.slice(1).find((w) => !w.redirect && !w.text.startsWith("-"));
+      // A bare `cd` goes home, which is outside any workspace root.
+      const target = arg ? resolveOperand(arg, base) : homedir();
       if (target === null) return null;
       base = target;
       continue;
     }
-    out.push({ text, base });
+    out.push({ text: seg.text, base, words });
   }
   return out;
 }
 
-/** Bare (non-flag) operands of a segment, minus the command word. */
-const operandsOf = (text: string): string[] => text.split(/\s+/).slice(1).filter((t) => t && !t.startsWith("-"));
+/** Bare (non-flag) operands of a segment, minus the command word and redirect targets. */
+const operandsOf = (words: Word[]): Word[] =>
+  words.slice(1).filter((w) => !w.redirect && w.text && !w.text.startsWith("-"));
 
 /** `find <roots...> -flags` — the roots are what a `-delete`/`-exec rm` will chew through. */
-function findRoots(text: string): string[] {
-  const roots: string[] = [];
-  for (const t of text.split(/\s+/).slice(1)) {
-    if (t.startsWith("-")) break;
-    roots.push(t);
+function findRoots(words: Word[]): Word[] {
+  const roots: Word[] = [];
+  for (const w of words.slice(1)) {
+    if (w.redirect) continue;
+    if (w.text.startsWith("-")) break;
+    roots.push(w);
   }
-  return roots.length ? roots : ["."];
+  return roots.length ? roots : [{ text: ".", expands: false, redirect: false }];
 }
 
-/** Output-redirect destinations (`> f`, `>> f`), ignoring fd dups and process substitution. */
-function redirectTargets(text: string): string[] {
-  const out: string[] = [];
-  const re = /(?:^|\s)>>?\s*(?![&(])("[^"]*"|'[^']*'|\S+)/g;
-  for (let m = re.exec(text); m; m = re.exec(text)) out.push(m[1]);
-  return out;
-}
+/** Output-redirect destinations (`> f`, `>> f`); fd dups and procsubs never reach here. */
+const redirectTargets = (words: Word[]): Word[] => words.filter((w) => w.redirect && w.text);
 
-const DELETER = /^(?:rm|rmdir|unlink|trash)\b/;
-const MOVER = /^(?:mv|install)\b/;
+const DELETERS = new Set(["rm", "rmdir", "unlink", "trash"]);
+const MOVERS = new Set(["mv", "install"]);
 /** Commands that emit PATHS on stdout, so a downstream `xargs rm` is bounded by their roots. */
-const PATH_LISTER = /^(?:find|ls|fd)\b|^git\s+ls-files\b/;
+const LISTERS = new Set(["find", "ls", "fd"]);
+
+/**
+ * Transparent prefixes. `sudo rm -rf /` IS an `rm`, and the old string-prefix test
+ * (`/^rm\b/`) never saw it — the sudo rule downgraded a wipe of `/` to a mere confirm.
+ */
+const WRAPPERS = new Set(["sudo", "doas", "env", "nohup", "time", "nice", "command", "builtin", "exec"]);
+/** Wrapper flags that consume the following word, which is therefore not the command. */
+const WRAPPER_FLAG_WITH_VALUE = new Set(["-u", "-g", "-p", "-C", "-n", "--user", "--group"]);
+
+function peelWrappers(words: Word[]): Word[] {
+  for (let guard = 0; guard < 8; guard++) {
+    if (!words.length || !WRAPPERS.has(words[0].text)) return words;
+    let i = 1;
+    while (i < words.length && (words[i].text.startsWith("-") || ASSIGNMENT.test(words[i].text))) {
+      if (WRAPPER_FLAG_WITH_VALUE.has(words[i].text)) i++;
+      i++;
+    }
+    if (i >= words.length) return words; // wrapper with no command after it
+    words = words.slice(i);
+  }
+  return words;
+}
 /** A predicate that narrows what `find` acts on. Without one, `-delete` means "everything". */
 const FIND_FILTER = /\s-(?:i?name|i?path|i?regex|i?wholename|type|newer|mtime|mmin|ctime|atime|size|user|group|perm|links|empty)\b/;
 
@@ -208,29 +515,33 @@ const FIND_FILTER = /\s-(?:i?name|i?path|i?regex|i?wholename|type|newer|mtime|mm
  * Path-scoped verdict for everything in the command that destroys or overwrites a
  * location, plus whether anything destructive was found at all (drives the snapshot).
  */
-function pathVerdicts(command: string, root: string): { verdict: Verdict; destructive: boolean } {
-  const segs = segmentize(command, root);
+function pathVerdicts(segs: Segment[] | null, root: string): { verdict: Verdict; destructive: boolean } {
   if (segs === null) return { verdict: confirm("a `cd` to a directory the guard can't resolve"), destructive: true };
 
   const verdicts: Verdict[] = [];
   let destructive = false;
   /** The upstream path-lister of the current pipeline, if the previous segment was one. */
-  let upstream: { roots: string[]; filtered: boolean } | null = null;
+  let upstream: { roots: Word[]; filtered: boolean } | null = null;
 
-  for (const { text, base } of segs) {
-    let targets: string[] | null = null;
+  for (const seg of segs) {
+    const { text, base } = seg;
+    const words = peelWrappers(seg.words);
+    const cmd = words[0]?.text ?? "";
+    const filtered = FIND_FILTER.test(text);
+
+    let targets: Word[] | null = null;
     let scope = false;
     let what = "deletes";
 
-    if (DELETER.test(text)) {
-      targets = operandsOf(text);
-    } else if (MOVER.test(text)) {
-      targets = operandsOf(text);
+    if (DELETERS.has(cmd)) {
+      targets = operandsOf(words);
+    } else if (MOVERS.has(cmd)) {
+      targets = operandsOf(words);
       what = "moves/overwrites";
-    } else if (/^find\b/.test(text) && /(?:-delete\b|-exec\s+rm\b)/.test(text)) {
-      targets = findRoots(text);
-      scope = FIND_FILTER.test(text);
-    } else if (/^(?:sudo\s+|env\s+\S+=\S+\s+)*xargs\b/.test(text) && /\brm\b/.test(text)) {
+    } else if (cmd === "find" && /(?:-delete\b|-exec\s+rm\b)/.test(text)) {
+      targets = findRoots(words);
+      scope = filtered;
+    } else if (cmd === "xargs" && words.some((w) => w.text === "rm")) {
       // Operands arrive on stdin, so the upstream segment is the only evidence available.
       // Only a path LISTER counts: `cat list | xargs rm` prints file contents, not paths,
       // and vouching for its operands would be vouching for the wrong thing entirely.
@@ -247,13 +558,12 @@ function pathVerdicts(command: string, root: string): { verdict: Verdict; destru
       );
     }
 
-    for (const r of redirectTargets(text)) {
+    for (const r of redirectTargets(seg.words)) {
       verdicts.push(classifyTarget(resolveOperand(r, base), root, "writes over"));
     }
 
-    upstream = PATH_LISTER.test(text)
-      ? { roots: /^find\b/.test(text) ? findRoots(text) : operandsOf(text), filtered: FIND_FILTER.test(text) }
-      : null;
+    const isLister = LISTERS.has(cmd) || (cmd === "git" && words[1]?.text === "ls-files");
+    upstream = isLister ? { roots: cmd === "find" ? findRoots(words) : operandsOf(words), filtered } : null;
   }
 
   return { verdict: worst(verdicts), destructive };
@@ -286,9 +596,10 @@ const isProtected = (ref: string): boolean => PROTECTED_BRANCHES.some((re) => re
 const refspecTarget = (spec: string): string =>
   (spec.includes(":") ? spec.slice(spec.indexOf(":") + 1) : spec).replace(/^\+/, "").replace(/^refs\/heads\//, "");
 
-function gitPushVerdict(text: string, root: string): Verdict | null {
-  if (!/^(?:sudo\s+)?git\b/.test(text)) return null;
-  const toks = text.split(/\s+/);
+function gitPushVerdict(words: Word[], root: string): Verdict | null {
+  const w = peelWrappers(words);
+  if (w[0]?.text !== "git") return null;
+  const toks = w.map((t) => t.text);
   const i = toks.indexOf("push");
   if (i === -1) return null;
 
@@ -409,15 +720,26 @@ function ruleVerdict(command: string): Verdict {
   return ALLOW;
 }
 
-function secretVerdict(command: string, root: string): Verdict {
+/**
+ * Runs on the RAW command, not the masked one: a quoted path is still a path, and the
+ * risk here is where a credential GOES, not whether it was written with quotes.
+ */
+function secretVerdict(command: string, root: string, segs: Segment[] | null): Verdict {
   if (!SECRET_PATH.test(command)) return ALLOW;
   if (OUTBOUND_SINK.test(command)) return confirm("secret material heading off-machine");
   // Reading the project's own secrets is fine; reaching outside the workspace for
   // someone else's is not.
-  for (const tok of command.split(/[\s'"=]+/)) {
-    if (!SECRET_PATH.test(tok)) continue;
-    const p = resolveOperand(tok, root);
-    if (p && !inside(p, root)) return confirm(`reads credentials outside the workspace: ${p}`);
+  for (const seg of segs ?? []) {
+    for (const w of seg.words) {
+      // `--key=value` hides the path in a flag, so try the value half too.
+      const eq = w.text.indexOf("=");
+      const candidates = eq === -1 ? [w] : [w, { ...w, text: w.text.slice(eq + 1) }];
+      for (const c of candidates) {
+        if (!SECRET_PATH.test(c.text)) continue;
+        const p = resolveOperand(c, seg.base);
+        if (p && !inside(p, root)) return confirm(`reads credentials outside the workspace: ${p}`);
+      }
+    }
   }
   return ALLOW;
 }
@@ -464,17 +786,22 @@ function sessionRoot(ctx: { cwd?: string }): string {
 }
 
 function decideBash(command: string, root: string): { verdict: Verdict; destructive: boolean } {
-  const rules = ruleVerdict(command);
+  const lexed = lex(command);
+
+  // The rule tier reads shell SYNTAX, so quoted prose and heredoc data are blanked
+  // first. Without this, `git commit -m "use mkfs to format"` hit the mkfs BLOCK rule.
+  const rules = ruleVerdict(lexed.masked);
   if (rules.level === "block") return { verdict: rules, destructive: false };
 
+  const segs = segmentize(lexed, root);
   const pushVerdicts: Verdict[] = [];
-  for (const seg of segmentize(command, root) ?? []) {
-    const v = gitPushVerdict(seg.text, root);
+  for (const seg of segs ?? []) {
+    const v = gitPushVerdict(seg.words, root);
     if (v) pushVerdicts.push(v);
   }
 
-  const paths = pathVerdicts(command, root);
-  const verdict = worst([rules, ...pushVerdicts, paths.verdict, secretVerdict(command, root)]);
+  const paths = pathVerdicts(segs, root);
+  const verdict = worst([rules, ...pushVerdicts, paths.verdict, secretVerdict(command, root, segs)]);
   return { verdict, destructive: paths.destructive };
 }
 

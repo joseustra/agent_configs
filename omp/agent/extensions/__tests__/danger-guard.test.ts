@@ -168,6 +168,46 @@ table("secrets: reading is fine, leaving is not", [
   ["scp key.pem user@host:", "confirm"],
 ]);
 
+// The guard reads a command STRING, and its regex tiers read that string as shell
+// syntax. Quoted prose is not shell syntax. Before the lexer, the cases below split on
+// operators inside quotes and matched verbs inside commit messages — and because BLOCK
+// is deliberately the tier with no dialog, a false positive there was unappealable.
+table("quoted text is prose, not shell", [
+  ['git commit -m "fix; rm -rf /"', "allow"],
+  ['git commit -m "cleanup && rm -rf ~"', "allow"],
+  ['git commit -m "use mkfs to format the disk"', "allow"],
+  ['git commit -m "call killall on the workers"', "allow"],
+  ['echo "pipe | rm -rf /etc"', "allow"],
+  ['acli jira workitem create --summary "delete the old board"', "allow"],
+  ['gh pr create --title x --body "we should terraform apply after this"', "allow"],
+  ['rm -rf "my build dir"', "allow"], // one operand, not three
+  ["rm -rf '$HOME'", "allow"], // single-quoted: a literal filename, not an expansion
+  ['rm -rf "$HOME"', "confirm"], // double-quoted: a live expansion, still unknowable
+  ['echo "safe" && rm -rf /', "block"], // real operators outside quotes still split
+]);
+
+// A heredoc body is data on stdin. `cat <<EOF … mkfs … EOF` is documentation.
+table("heredoc bodies are data, not shell", [
+  ["cat <<EOF > notes.txt\nremember: rm -rf / is bad\nEOF", "allow"],
+  ["cat <<'EOF' > doc.md\nrun mkfs to format\nEOF", "allow"], // quoted delimiter
+  ["cat > notes.txt <<-EOF\nsudo rm -rf ~\nEOF", "allow"], // <<- and leading-tab form
+  ["cat <<EOF > doc.md\nit's fine to rm things\nEOF\necho done", "allow"], // stray apostrophe
+  ["cat <<EOF > /etc/motd\nhi\nEOF", "confirm"], // the redirect target is still judged
+  ["cat <<EOF > a.txt\nx\nEOF\nrm -rf /", "block"], // commands AFTER the body still are
+]);
+
+// `sudo rm -rf /` is an `rm`. The old string-prefix test (`/^rm\b/`) saw only `sudo`,
+// so the sudo CONFIRM rule silently downgraded a wipe of `/` from block to a prompt.
+table("transparent wrappers don't hide the command", [
+  ["sudo rm -rf /", "block"],
+  ["sudo rm -rf .git", "block"],
+  ["nohup rm -rf ~", "block"],
+  ["env FOO=1 rm -rf /etc", "confirm"],
+  ["time rm -rf src", "allow"],
+  ["FOO=1 rm -rf src", "allow"], // a bare assignment prefix is not the command word
+  ["ls -la 2>&1 | head", "allow"], // fd dups name no file and are not operands
+]);
+
 describe("write/edit tools share the boundary", () => {
   test("inside the workspace", () => {
     expect(decideFileTool({ path: join(ROOT, "src/new.ts") }, ROOT).level).toBe("allow");
