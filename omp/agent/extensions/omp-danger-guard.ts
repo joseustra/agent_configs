@@ -22,7 +22,8 @@
  * The boundary is the SESSION ROOT (`ctx.cwd`, pinned at first use). Inside it the agent
  * is free, because git plus the snapshot below is the backup. Outside it, or wherever the
  * command can't be statically pinned to a location, it asks — with the system temp dir
- * (see TEMP_ROOTS) as the one other free zone, since it holds nothing worth restoring.
+ * (see TEMP_ROOTS), the session's git worktree family (see WORKTREE_FAMILY) and anything
+ * named in `$OMP_DANGER_GUARD_FREE_ROOTS` as the other free zones.
  * This replaces the old
  * "list every disposable build directory" approach — no `_build`/`node_modules` allowlist
  * to maintain, and it generalises to paths that list never covered.
@@ -43,7 +44,7 @@
  * resumes waiting on the SAME dialog. Net effect: the run stops at the prompt.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, realpathSync, unlinkSync } from "node:fs";
+import { existsSync, realpathSync, statSync, unlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
@@ -54,7 +55,16 @@ import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 const PROTECTED_BRANCHES: RegExp[] = [/^main$/, /^master$/, /^develop$/, /^production$/, /^release\//];
 
 /** Deleting any of these destroys the backup that makes the whole ALLOW tier safe. */
-const VCS_DIRS = new Set([".git", ".jj", ".hg", ".svn", ".worktrees"]);
+const VCS_DIRS = new Set([".git", ".jj", ".hg", ".svn"]);
+
+/**
+ * Containers of worktree CHECKOUTS — not VCS metadata. The container and each checkout
+ * directly under it are untouchable (removing one throws away a whole working copy, and
+ * `git worktree remove` is the way to do it deliberately), but the code INSIDE a checkout
+ * is ordinary project code: `.worktrees/feat-x/src/a.ts` is a source file, and treating
+ * its path as metadata BLOCKED every edit in a session rooted at that worktree.
+ */
+const CHECKOUT_DIRS = new Set([".worktrees"]);
 
 /**
  * Character devices a redirect writes THROUGH rather than over: the bit bucket, the
@@ -81,10 +91,50 @@ const UNBACKED_FILE = /^\.env(\.[\w.-]+)?$|\.(?:pem|key|p12|pfx)$|^\.netrc$|^\.p
 const TEMP_ROOTS: string[] = [...new Set(["/tmp", "/private/tmp"].map(realpathDeep))];
 
 /**
+ * Treat every checkout of the session's repo — the main working tree and all its
+ * `git worktree` siblings — as one workspace.
+ *
+ * A worktree session is ONE project split across directories: the agent creates the
+ * worktree from the main checkout, copies a config into it, reads a file back out of the
+ * main tree. Judged as raw paths that is a stream of "outside the workspace" prompts for
+ * what is plainly ordinary work in the project the session is already free inside.
+ *
+ * This is not a hole so much as the boundary catching up with the layout: every path it
+ * admits is a checkout of the same repo, so git is still the backup, and `.git` itself is
+ * still BLOCK. Set to false for the strict, one-directory boundary.
+ */
+const WORKTREE_FAMILY = true;
+
+/**
+ * Extra roots the agent is as free inside as in the session root, colon-separated in
+ * `$OMP_DANGER_GUARD_FREE_ROOTS` (`~` allowed). For the case the worktree family can't
+ * see: a session rooted in one repo that legitimately writes into a SEPARATE one — a
+ * sibling checkout, a generated-config directory, a scratch tree outside /tmp.
+ *
+ * Each entry is a promise that git or a copy elsewhere can restore what is inside it, so
+ * name project directories, not `~`: `/` and `$HOME` are rejected outright, and every
+ * other entry hands over its whole subtree.
+ */
+const FREE_ROOTS: string[] = [
+  ...new Set(
+    (process.env.OMP_DANGER_GUARD_FREE_ROOTS ?? "")
+      .split(":")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => (s === "~" ? homedir() : s.startsWith("~/") ? homedir() + s.slice(1) : s))
+      .filter(isAbsolute)
+      .map(realpathDeep)
+      .filter((p) => p !== "/" && p !== homedir()),
+  ),
+];
+
+/**
  * Write a `refs/danger-guard/<ts>` snapshot commit before allowing a destructive command.
  * Closes the gap in "git is my backup": git recovers COMMITTED work, and the ALLOW tier
  * lets the agent destroy uncommitted edits and untracked files inside the root. Uses a
- * throwaway index, so the working tree and the real index are untouched. Recover with
+ * throwaway index, so the working tree and the real index are untouched. Taken in the
+ * working tree that OWNS each doomed path (see `snapshotTargets`), which for a worktree
+ * session is often not the session root. Recover with
  * `git log refs/danger-guard/*` then `git checkout <ref> -- <path>`.
  * Respects .gitignore, so ignored files are NOT covered — which is why deleting a
  * gitignored `.env` is CONFIRM above rather than ALLOW.
@@ -429,7 +479,47 @@ function resolveOperand(w: Word, base: string): string | null {
 
 const inside = (p: string, root: string): boolean => p === root || p.startsWith(root.endsWith(sep) ? root : root + sep);
 
-const touchesVcs = (p: string): boolean => p.split(sep).some((c) => VCS_DIRS.has(c));
+function touchesVcs(p: string): boolean {
+  const parts = p.split(sep);
+  if (parts.some((c) => VCS_DIRS.has(c))) return true;
+  // The container itself, or one checkout directly under it. Anything deeper is source.
+  const i = parts.findIndex((c) => CHECKOUT_DIRS.has(c));
+  return i !== -1 && i >= parts.length - 2;
+}
+
+/**
+ * Every checkout of the session's repo: the main working tree plus every `git worktree`.
+ * Re-read on a short TTL rather than pinned, because the agent CREATES worktrees mid-run
+ * and a pinned list would leave the one it just made outside the boundary.
+ */
+let familyCache: { root: string; at: number; roots: string[] } | undefined;
+const FAMILY_TTL_MS = 5_000;
+
+function worktreeFamily(root: string): string[] {
+  if (!WORKTREE_FAMILY) return [];
+  const now = Date.now();
+  if (familyCache && familyCache.root === root && now - familyCache.at < FAMILY_TTL_MS) return familyCache.roots;
+  const listed = git(root, ["worktree", "list", "--porcelain"]);
+  const roots = (listed ?? "")
+    .split("\n")
+    .filter((l) => l.startsWith("worktree "))
+    .map((l) => realpathDeep(l.slice("worktree ".length).trim()))
+    .filter((p) => p && p !== "/" && p !== homedir());
+  familyCache = { root, at: now, roots };
+  return roots;
+}
+
+/**
+ * Roots outside the session root that the agent is free inside anyway. Unlike the temp
+ * relaxation these are NOT switched off when they contain the session root: a worktree at
+ * `<repo>/.worktrees/feat-x` has the main checkout as its parent, and admitting that
+ * parent is the entire point of the setting.
+ */
+function freeRoots(root: string): string[] {
+  return [...new Set([...tempRoots(root), ...FREE_ROOTS, ...worktreeFamily(root)])].filter((p) => p !== root);
+}
+
+const insideAny = (p: string, roots: string[]): boolean => roots.some((r) => inside(p, r));
 
 /**
  * The temp roots that count as free for THIS session. Temp is only free while the
@@ -451,11 +541,11 @@ function classifyTarget(p: string | null, root: string, what: string, scope = fa
   if (p === null) return confirm(`${what} a path that can't be resolved statically`);
   if (touchesVcs(p)) return block(`${what} version-control metadata (${basename(p)}) — the backup itself`);
   if (p === "/" || p === homedir()) return block(`${what} ${p}`);
-  const temps = tempRoots(root);
-  // The temp root itself is shared with every other process on the machine, so wiping it
-  // asks — exactly like the workspace root below.
-  if (temps.includes(p) && !scope) return confirm(`${what} the shared temp root itself: ${p}`);
-  if (!inside(p, root) && !temps.some((t) => inside(p, t))) return confirm(`${what} outside the workspace: ${p}`);
+  const frees = freeRoots(root);
+  // A free root is free to work INSIDE; taking the whole thing out — the shared temp dir,
+  // the main checkout, a configured project root — asks, exactly like the workspace root.
+  if (frees.includes(p) && !scope) return confirm(`${what} a shared root itself: ${p}`);
+  if (!inside(p, root) && !insideAny(p, frees)) return confirm(`${what} outside the workspace: ${p}`);
   if (p === root && !scope) return confirm(`${what} the workspace root itself`);
   if (UNBACKED_FILE.test(basename(p))) return confirm(`${what} ${basename(p)} — gitignored, so git can't restore it`);
   return ALLOW;
@@ -548,12 +638,20 @@ const FIND_FILTER = /\s-(?:i?name|i?path|i?regex|i?wholename|type|newer|mtime|mm
 
 /**
  * Path-scoped verdict for everything in the command that destroys or overwrites a
- * location, plus whether anything destructive was found at all (drives the snapshot).
+ * location, plus whether anything destructive was found at all and the resolved paths it
+ * was found on. Both drive the snapshot: `destructive` says whether to take one, and
+ * `targets` says which repo it has to be taken IN — now that the boundary spans a whole
+ * worktree family, the doomed file is often not in the session root's checkout.
  */
-function pathVerdicts(segs: Segment[] | null, root: string): { verdict: Verdict; destructive: boolean } {
-  if (segs === null) return { verdict: confirm("a `cd` to a directory the guard can't resolve"), destructive: true };
+function pathVerdicts(
+  segs: Segment[] | null,
+  root: string,
+): { verdict: Verdict; destructive: boolean; targets: string[] } {
+  if (segs === null)
+    return { verdict: confirm("a `cd` to a directory the guard can't resolve"), destructive: true, targets: [] };
 
   const verdicts: Verdict[] = [];
+  const targeted: string[] = [];
   let destructive = false;
   /** The upstream path-lister of the current pipeline, if the previous segment was one. */
   let upstream: { roots: Word[]; filtered: boolean } | null = null;
@@ -586,10 +684,12 @@ function pathVerdicts(segs: Segment[] | null, root: string): { verdict: Verdict;
 
     if (targets !== null) {
       destructive = true;
+      const resolved = targets.map((t) => resolveOperand(t, base));
+      for (const p of resolved) if (p !== null) targeted.push(p);
       verdicts.push(
         targets.length === 0
           ? confirm(`a delete whose targets the guard can't see (\`${text.slice(0, 60)}\`)`)
-          : worst(targets.map((t) => classifyTarget(resolveOperand(t, base), root, what, scope))),
+          : worst(resolved.map((p) => classifyTarget(p, root, what, scope))),
       );
     }
 
@@ -598,14 +698,16 @@ function pathVerdicts(segs: Segment[] | null, root: string): { verdict: Verdict;
       // "outside the workspace" and asked — so `grep … 2>/dev/null`, the single most
       // ordinary command shape there is, opened a dialog and stopped the run.
       if (DEV_SINK.test(r.text)) continue;
-      verdicts.push(classifyTarget(resolveOperand(r, base), root, "writes over"));
+      const p = resolveOperand(r, base);
+      if (p !== null) targeted.push(p);
+      verdicts.push(classifyTarget(p, root, "writes over"));
     }
 
     const isLister = LISTERS.has(cmd) || (cmd === "git" && words[1]?.text === "ls-files");
     upstream = isLister ? { roots: cmd === "find" ? findRoots(words) : operandsOf(words), filtered } : null;
   }
 
-  return { verdict: worst(verdicts), destructive };
+  return { verdict: worst(verdicts), destructive, targets: targeted };
 }
 
 // ── git: protected branches ──────────────────────────────────────────────────
@@ -776,7 +878,10 @@ function secretVerdict(command: string, root: string, segs: Segment[] | null): V
       for (const c of candidates) {
         if (!SECRET_PATH.test(c.text)) continue;
         const p = resolveOperand(c, seg.base);
-        if (p && !inside(p, root)) return confirm(`reads credentials outside the workspace: ${p}`);
+        // The project's own `.env` is the project's own `.env` in whichever checkout it
+        // sits in, so the free roots count here too.
+        if (p && !inside(p, root) && !insideAny(p, freeRoots(root)))
+          return confirm(`reads credentials outside the workspace: ${p}`);
       }
     }
   }
@@ -784,6 +889,57 @@ function secretVerdict(command: string, root: string, segs: Segment[] | null): V
 }
 
 // ── Snapshot ─────────────────────────────────────────────────────────────────
+
+/** Deepest directory at or above `p` that exists — the only place `git -C` can run. */
+function existingDir(p: string): string {
+  let d = p;
+  for (;;) {
+    if (existsSync(d)) return statIsDir(d) ? d : dirname(d);
+    const parent = dirname(d);
+    if (parent === d) return d;
+    d = parent;
+  }
+}
+
+const statIsDir = (p: string): boolean => {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+/** The working tree that actually contains `p`, or null when nothing there is versioned. */
+function owningWorktree(p: string): string | null {
+  const top = git(existingDir(p), ["rev-parse", "--show-toplevel"]);
+  return top ? realpathDeep(top) : null;
+}
+
+/**
+ * Snapshot every working tree the command is about to damage — not the session root.
+ *
+ * `git -C <session root>` commits the session root's INDEX and tree, so a session in one
+ * worktree deleting uncommitted work in a sibling checkout used to write a snapshot that
+ * captured none of it: shared object store, different working tree. Each doomed path is
+ * mapped back to its own `--show-toplevel` instead, so the ref that gets written is one
+ * the file can actually be recovered from. Refs under `refs/danger-guard/` are common to
+ * the repo, not per-worktree, so `git log refs/danger-guard/*` still finds them all from
+ * anywhere in the family.
+ *
+ * Paths in no repo at all (a scratch file in /tmp) get no snapshot — there was never
+ * anything to restore from. With no resolvable path, it falls back to the session root,
+ * which is the old behaviour and the safe direction.
+ */
+function snapshotTargets(root: string, targets: string[], reason: string): void {
+  if (!SNAPSHOT_BEFORE_DESTRUCTIVE) return;
+  const trees = new Set<string>();
+  for (const p of targets) {
+    const owner = owningWorktree(p);
+    if (owner) trees.add(owner);
+  }
+  if (!trees.size && !targets.length) trees.add(root);
+  for (const tree of trees) snapshot(tree, reason);
+}
 
 /** Best-effort: a failed snapshot never blocks the command it was protecting. */
 function snapshot(root: string, reason: string): void {
@@ -824,13 +980,13 @@ function sessionRoot(ctx: { cwd?: string }): string {
   return PINNED_ROOT;
 }
 
-function decideBash(command: string, root: string): { verdict: Verdict; destructive: boolean } {
+function decideBash(command: string, root: string): { verdict: Verdict; destructive: boolean; targets: string[] } {
   const lexed = lex(command);
 
   // The rule tier reads shell SYNTAX, so quoted prose and heredoc data are blanked
   // first. Without this, `git commit -m "use mkfs to format"` hit the mkfs BLOCK rule.
   const rules = ruleVerdict(lexed.masked);
-  if (rules.level === "block") return { verdict: rules, destructive: false };
+  if (rules.level === "block") return { verdict: rules, destructive: false, targets: [] };
 
   const segs = segmentize(lexed, root);
   const pushVerdicts: Verdict[] = [];
@@ -841,7 +997,7 @@ function decideBash(command: string, root: string): { verdict: Verdict; destruct
 
   const paths = pathVerdicts(segs, root);
   const verdict = worst([rules, ...pushVerdicts, paths.verdict, secretVerdict(command, root, segs)]);
-  return { verdict, destructive: paths.destructive };
+  return { verdict, destructive: paths.destructive, targets: paths.targets };
 }
 
 /** write/edit bypass bash entirely, so the same boundary applies to their target path. */
@@ -851,8 +1007,7 @@ function decideFileTool(input: unknown, root: string): Verdict {
   if (typeof raw !== "string" || !raw) return ALLOW;
   const p = realpathDeep(isAbsolute(raw) ? normalize(raw) : resolve(root, raw));
   if (touchesVcs(p)) return block(`writing into version-control metadata (${basename(p)})`);
-  if (!inside(p, root) && !tempRoots(root).some((t) => inside(p, t)))
-    return confirm(`writes outside the workspace: ${p}`);
+  if (!inside(p, root) && !insideAny(p, freeRoots(root))) return confirm(`writes outside the workspace: ${p}`);
   return ALLOW;
 }
 
@@ -884,6 +1039,8 @@ export default function ompDangerGuard(pi: HookAPI): void {
     let verdict: Verdict;
     let key: string;
     let destructive = false;
+    /** The paths the command would destroy — where the snapshot has to be taken. */
+    let targets: string[] = [];
 
     if (tool === "bash") {
       const raw = input && typeof input === "object" && "command" in input ? input.command : undefined;
@@ -892,6 +1049,7 @@ export default function ompDangerGuard(pi: HookAPI): void {
       const decision = decideBash(command, root);
       verdict = decision.verdict;
       destructive = decision.destructive;
+      targets = decision.targets;
       key = command;
     } else {
       verdict = decideFileTool(input, root);
@@ -899,7 +1057,7 @@ export default function ompDangerGuard(pi: HookAPI): void {
     }
 
     if (verdict.level === "allow") {
-      if (destructive) snapshot(root, key.slice(0, 120));
+      if (destructive) snapshotTargets(root, targets, key.slice(0, 120));
       return;
     }
 
@@ -925,7 +1083,7 @@ export default function ompDangerGuard(pi: HookAPI): void {
       const answer = decided.get(key)!;
       decided.delete(key);
       if (!answer) return { block: true, reason: `danger-guard: user denied (${verdict.label})` };
-      if (destructive) snapshot(root, key.slice(0, 120));
+      if (destructive) snapshotTargets(root, targets, key.slice(0, 120));
       return;
     }
 
@@ -973,9 +1131,9 @@ export default function ompDangerGuard(pi: HookAPI): void {
 
     decided.delete(key);
     if (!answer) return { block: true, reason: `danger-guard: user denied (${verdict.label})` };
-    if (destructive) snapshot(root, key.slice(0, 120));
+    if (destructive) snapshotTargets(root, targets, key.slice(0, 120));
   });
 }
 
 // Exported for the test harness in `omp/agent/extensions/__tests__`.
-export { decideBash, decideFileTool, sessionRoot, snapshot };
+export { decideBash, decideFileTool, sessionRoot, snapshot, snapshotTargets };
