@@ -10,10 +10,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { decideBash, decideFileTool, snapshot } from "../omp-danger-guard.ts";
+import { decideBash, decideFileTool, snapshot, snapshotTargets } from "../omp-danger-guard.ts";
 
 let ROOT: string;
 let OUTSIDE: string;
+let SIBLING: string; // a `git worktree` of ROOT, outside it entirely
+let NESTED: string; // a `git worktree` of ROOT at ROOT/.worktrees/feat-x
 
 beforeAll(() => {
   // realpath: on macOS mkdtemp hands back /var/... which is a symlink to /private/var/...,
@@ -36,6 +38,13 @@ beforeAll(() => {
   git("config", "user.name", "t");
   git("add", "-A");
   git("commit", "-qm", "init");
+
+  SIBLING = join(ROOT, "..", "wt-sibling");
+  NESTED = join(ROOT, ".worktrees", "feat-x");
+  git("worktree", "add", "-q", "-b", "wt-sibling", SIBLING);
+  git("worktree", "add", "-q", "-b", "feat-x", NESTED);
+  SIBLING = realpathSync(SIBLING);
+  NESTED = realpathSync(NESTED);
 });
 
 afterAll(() => rmSync(join(ROOT, ".."), { recursive: true, force: true }));
@@ -263,7 +272,48 @@ describe("a workspace that lives in temp keeps its boundary", () => {
   });
 });
 
+// One project split across directories: the session is free in every checkout of its own
+// repo, so copying a file from the main tree into a fresh worktree is not a prompt.
+describe("the git worktree family is one workspace", () => {
+  test("the main checkout reaches into a sibling worktree", () => {
+    expect(decideFileTool({ path: join(SIBLING, "src/new.ts") }, ROOT).level).toBe("allow");
+    expect(decideBash(`cp src/a.ts ${SIBLING}/src/a.ts`, ROOT).verdict.level).toBe("allow");
+    expect(decideBash(`rm -rf ${join(SIBLING, "_build")}`, ROOT).verdict.level).toBe("allow");
+  });
+
+  test("a worktree session reaches back into the main checkout", () => {
+    expect(decideFileTool({ path: join(ROOT, "src/a.ts") }, SIBLING).level).toBe("allow");
+    expect(decideBash(`rm -rf ${join(ROOT, "_build")}`, SIBLING).verdict.level).toBe("allow");
+  });
+
+  test("a nested worktree is source, not VCS metadata", () => {
+    expect(decideFileTool({ path: join(NESTED, "src/a.ts") }, NESTED).level).toBe("allow");
+    expect(decideFileTool({ path: join(NESTED, "src/a.ts") }, ROOT).level).toBe("allow");
+    // …but removing a whole checkout, or the container, is still refused outright.
+    expect(decideBash("rm -rf .worktrees/feat-x", ROOT).verdict.level).toBe("block");
+    expect(decideBash("rm -rf .worktrees", ROOT).verdict.level).toBe("block");
+    expect(decideFileTool({ path: join(NESTED, ".git") }, ROOT).level).toBe("block");
+  });
+
+  test("taking out a whole checkout still asks", () => {
+    expect(decideBash(`rm -rf ${SIBLING}`, ROOT).verdict.level).toBe("confirm");
+  });
+
+  test("an unrelated directory next door is still outside", () => {
+    expect(decideFileTool({ path: join(OUTSIDE, "x.ts") }, SIBLING).level).toBe("confirm");
+    expect(decideBash(`rm -rf ${OUTSIDE}`, SIBLING).verdict.level).toBe("confirm");
+  });
+});
+
 describe("snapshot", () => {
+  const refsIn = (tree: string) =>
+    execFileSync("git", ["-C", tree, "for-each-ref", "--format=%(refname)", "refs/danger-guard/"], {
+      encoding: "utf8",
+    })
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+
   test("captures uncommitted work the ALLOW tier is about to destroy", () => {
     writeFileSync(join(ROOT, "src", "uncommitted.ts"), "// never committed");
     const decision = decideBash("rm -rf src/uncommitted.ts", ROOT);
@@ -278,5 +328,32 @@ describe("snapshot", () => {
       encoding: "utf8",
     });
     expect(listed).toContain("src/uncommitted.ts");
+  });
+
+  // The boundary now spans the worktree family, so the doomed file is often NOT in the
+  // session root's checkout — and `git -C <session root>` would snapshot the wrong tree.
+  test("is taken in the worktree that owns the doomed path, not the session root", () => {
+    writeFileSync(join(SIBLING, "src", "only-here.ts"), "// uncommitted, in the sibling");
+    const decision = decideBash(`rm -rf ${join(SIBLING, "src", "only-here.ts")}`, ROOT);
+    expect(decision.verdict.level).toBe("allow");
+    expect(decision.targets).toContain(join(SIBLING, "src", "only-here.ts"));
+
+    snapshotTargets(ROOT, decision.targets, "cross-worktree");
+    const owning = refsIn(SIBLING).filter((ref) =>
+      execFileSync("git", ["-C", SIBLING, "ls-tree", "-r", "--name-only", ref], { encoding: "utf8" }).includes(
+        "src/only-here.ts",
+      ),
+    );
+    expect(owning.length).toBeGreaterThan(0);
+    // Parented on the SIBLING's HEAD: the snapshot sits on that checkout's history.
+    const parent = execFileSync("git", ["-C", SIBLING, "rev-parse", `${owning[0]}^`], { encoding: "utf8" }).trim();
+    const head = execFileSync("git", ["-C", SIBLING, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    expect(parent).toBe(head);
+  });
+
+  test("a path in no repo at all gets no snapshot", () => {
+    const before = refsIn(ROOT).length;
+    snapshotTargets(ROOT, ["/tmp/dg-not-a-repo/scratch.txt"], "temp");
+    expect(refsIn(ROOT).length).toBe(before);
   });
 });
