@@ -51,14 +51,13 @@ guesses it: a guessed pane number sends a reply to a stranger.
 
 ## Dispatch
 
-Dispatch is three commands and one check.
+Write the brief first. Dispatch is then three commands.
 
 ```sh
 grove new 259 "warm a cold session"     # run inside the repository
 helm-cli warm 259
 sleep 4                                 # let the shell become ready
 helm-cli prompt 259:1 'claude "read /tmp/brief-259.md and do exactly what it says"'
-ps -ax -o args= | grep -F 'read /tmp/brief-259.md'          # verify
 ```
 
 Four things carry the weight here:
@@ -71,20 +70,17 @@ Four things carry the weight here:
 2. **`helm-cli warm` gives the session shells.** It opens no window and takes no
    focus. A session in the spool is cold and has no pane. A prompt at a cold
    session exits 0 and types nowhere. This is the step people forget.
-3. **Wait 4 seconds after `warm`.** `warm` spawns the shell; the shell is not
-   ready the instant it exists. A line typed too early loses characters. Four
-   seconds makes a corrupted line **unlikely, not impossible**. It improves the
-   odds and does nothing else. The `ps` check below is what makes the dispatch
-   safe.
+3. **Wait 4 seconds after `warm`.** `warm` spawns the shell. The shell is not
+   ready the instant it exists. A line typed too early loses characters. 4
+   seconds makes a corrupted line **unlikely, not impossible**.
 4. **The brief goes inside `claude "..."`, as one line.** One keystroke line
    starts the harness and hands it the work, so nothing races the harness boot.
    A prompt is one line; an interior newline is refused.
 
 ### Keep the dispatched line short
 
-A long line has more characters to lose, and a corrupted long line is harder to
-recognise in the process table. So the line that goes over the socket names a
-brief; it does not carry one.
+A long line has more characters to lose. So the line that goes over the socket
+names a brief. It does not carry one.
 
 ```sh
 # write the brief with the Write tool, then name it
@@ -93,42 +89,25 @@ helm-cli prompt 259:1 'claude "read /tmp/brief-259.md and do exactly what it say
 
 Write the brief to a file under `/tmp`, one file per ticket, named for the
 ticket. The file holds the three lines of substance and the fixed footer. The
-prompt holds one short sentence, which is also an exact and readable grep key
-for the `ps` check.
+prompt holds one short sentence.
 
 `helm-cli prompt <session[:pane]> --file PATH` reads the line from a file, and
 drops a trailing newline. That helps with quoting, not with length: it is still
 one line, and it is still typed as keystrokes. Use it for a line that is awkward
 to quote in the shell. Use a brief file for a brief.
 
-### Verify the line, every time
+### What exit 0 means
 
-A prompt into a just-warmed shell can arrive **in part**, and the 4 second wait
-does not prevent it. Characters are lost mid-line, and the shell runs a
-corrupted command. Exit 0 says Helm took the line. It does not say a pane
-received it, and nothing is written back over the socket.
+Exit 0 says Helm took the line. It does not say a pane received it. Nothing is
+written back over the socket.
 
-So after every dispatch, read the process table:
+A prompt into a just-warmed shell can arrive **in part**. Characters are lost
+mid-line, and the shell runs a corrupted command. The 4 second wait makes this
+unlikely. It does not make it impossible.
 
-```sh
-ps -ax -o args= | grep -F 'read /tmp/brief-259.md'
-```
-
-One match with the exact line means the dispatch landed. Report it. No match
-means the dispatch failed, and the next move depends on what is running:
-
-| process table | meaning | move |
-|---|---|---|
-| exact line matches | landed | report `DISPATCH` |
-| no `claude` in that workspace | nothing landed | send the same line again |
-| a `claude` with a different or truncated line | partial landing | kill it, then send again |
-
-**Never send again on a partial landing.** Helm's own advice — "sending again is
-the way out" — covers a swallowed nudge, not a corrupted command. A second line
-typed at a harness that is already running answers a prompt inside it, or
-appends to the mangled one. Read the table first, and act on what it says.
-
-Never assume a dispatch worked because the command exited 0.
+The orchestrator does not verify the dispatch. It reports what it sent. A
+corrupted dispatch shows up the ordinary way: the worker never replies, and
+`git` and `gh` show no branch and no PR. Report those facts as they are.
 
 ## The brief the orchestrator sends
 
@@ -188,7 +167,7 @@ Two rules follow, and both are mandatory:
 ## Output shapes
 
 ```
-DISPATCH  259  session 259  pane 1  brief sent  verified
+DISPATCH  259  session 259  pane 1  brief sent
 
 STATUS
   259  pushed  2 commits  PR #260 open  CI pass  reply 14:20
@@ -205,7 +184,7 @@ One clause per column. Active voice, present tense, one word for one thing.
 
 | the human says | the orchestrator runs |
 |---|---|
-| **dispatch** — "start 259" | write `/tmp/brief-259.md`, then `grove new`, `helm-cli warm`, `sleep 4`, `helm-cli prompt`, then the `ps` check |
+| **dispatch** — "start 259" | write `/tmp/brief-259.md`, then `grove new`, `helm-cli warm`, `sleep 4`, `helm-cli prompt` |
 | **status** | `grove list`, `helm-cli ls --json`, `gh pr list`, `git log`; then one `prompt <worker> "status?"` per live worker |
 | **relay** — "tell 259 to also update the docs" | one `helm-cli prompt 259:1 '<the instruction>'`, then report `RELAY` |
 | **retire** — after a merge | propose `grove destroy <ticket>` in status; run it only when the human asks |
@@ -261,4 +240,4 @@ arguments were not a command.
 `grove`: **1** on any failure, with the reason on stderr.
 
 Exit 0 from `prompt` and `warm` means Helm took the line. It never means a pane
-received it. That is what the `ps` check is for.
+received it. Report a dispatch as sent, never as received.
