@@ -212,6 +212,20 @@ table("heredoc bodies are data, not shell", [
 
 // `sudo rm -rf /` is an `rm`. The old string-prefix test (`/^rm\b/`) saw only `sudo`,
 // so the sudo CONFIRM rule silently downgraded a wipe of `/` from block to a prompt.
+// A redirect to the bit bucket writes over nothing. Judged as a path, /dev/null is
+// outside the workspace — and `2>/dev/null` is far too ordinary to spend a dialog on.
+table("discarding output is not overwriting a file", [
+  ["grep -rn permission_role lib/**/*.ex 2>/dev/null | head -6", "allow"],
+  ["psql -c 'select 1' > /dev/null 2>&1", "allow"],
+  ["command -v fd >/dev/null", "allow"],
+  ["echo hi > /dev/stdout", "allow"],
+  ["echo hi > /dev/fd/2", "allow"],
+  // …but a real device is still a device, and a delete is still a delete.
+  ["cat disk.img > /dev/sda", "block"],
+  ["rm -rf /dev/null", "confirm"],
+  ["echo x > /dev/nullish", "confirm"], // exact match only: this is a file in /dev
+]);
+
 table("transparent wrappers don't hide the command", [
   ["sudo rm -rf /", "block"],
   ["sudo rm -rf .git", "block"],

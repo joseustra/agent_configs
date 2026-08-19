@@ -73,7 +73,7 @@ providers, theme.
   the guard keeps ONE dialog open across that cap and blocks each attempt with a
   "re-run to keep waiting" reason until you answer.
 
-  Policy is tested: `make test` (89 cases in
+  Policy is tested: `make test` (131 cases in
   [`extensions/__tests__`](agent/extensions/__tests__/danger-guard.test.ts)).
   Tune `PROTECTED_BRANCHES`, `SNAPSHOT_BEFORE_DESTRUCTIVE`, and the rule tables at
   the top of the file; add a case to the table when you do.

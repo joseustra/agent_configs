@@ -56,6 +56,17 @@ const PROTECTED_BRANCHES: RegExp[] = [/^main$/, /^master$/, /^develop$/, /^produ
 /** Deleting any of these destroys the backup that makes the whole ALLOW tier safe. */
 const VCS_DIRS = new Set([".git", ".jj", ".hg", ".svn", ".worktrees"]);
 
+/**
+ * Character devices a redirect writes THROUGH rather than over: the bit bucket, the
+ * process's own streams, the terminal. Nothing here holds state to lose, so `2>/dev/null`
+ * is not an overwrite of anything and must not be judged as a path.
+ *
+ * Deliberately an exact-match list, not `/dev/*`: `> /dev/sda` is a disk and stays a
+ * BLOCK rule, and `rm /dev/null` is a delete rather than a redirect, so it still goes
+ * through the normal path tier.
+ */
+const DEV_SINK = /^\/dev\/(?:null|zero|full|tty|std(?:in|out|err)|fd\/\d+|u?random)$/;
+
 /** Unrecoverable-by-git files: git isn't backing them up, so deletion is forever. */
 const UNBACKED_FILE = /^\.env(\.[\w.-]+)?$|\.(?:pem|key|p12|pfx)$|^\.netrc$|^\.pgpass$/;
 
@@ -583,6 +594,10 @@ function pathVerdicts(segs: Segment[] | null, root: string): { verdict: Verdict;
     }
 
     for (const r of redirectTargets(seg.words)) {
+      // A redirect to /dev/null is a DISCARD, not an overwrite. Judged as a path it is
+      // "outside the workspace" and asked — so `grep … 2>/dev/null`, the single most
+      // ordinary command shape there is, opened a dialog and stopped the run.
+      if (DEV_SINK.test(r.text)) continue;
       verdicts.push(classifyTarget(resolveOperand(r, base), root, "writes over"));
     }
 
