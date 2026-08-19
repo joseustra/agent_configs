@@ -56,11 +56,12 @@ Dispatch is three commands and one check.
 ```sh
 grove new 259 "warm a cold session"     # run inside the repository
 helm-cli warm 259
-helm-cli prompt 259:1 'claude "<the brief>"'
-ps -ax -o args= | grep -F 'claude "<the brief>"'   # verify
+sleep 4                                 # let the shell become ready
+helm-cli prompt 259:1 'claude "read /tmp/brief-259.md and do exactly what it says"'
+ps -ax -o args= | grep -F 'read /tmp/brief-259.md'          # verify
 ```
 
-Three things carry the weight here:
+Four things carry the weight here:
 
 1. **`grove new` must run inside the repository the ticket belongs to.** It
    branches off the HEAD of the invoking worktree, so check the repository is on
@@ -70,22 +71,47 @@ Three things carry the weight here:
 2. **`helm-cli warm` gives the session shells.** It opens no window and takes no
    focus. A session in the spool is cold and has no pane. A prompt at a cold
    session exits 0 and types nowhere. This is the step people forget.
-3. **The brief goes inside `claude "..."`, as one line.** One keystroke line
+3. **Wait 4 seconds after `warm`.** `warm` spawns the shell; the shell is not
+   ready the instant it exists. A line typed too early loses characters. Four
+   seconds makes a corrupted line **unlikely, not impossible**. It improves the
+   odds and does nothing else. The `ps` check below is what makes the dispatch
+   safe.
+4. **The brief goes inside `claude "..."`, as one line.** One keystroke line
    starts the harness and hands it the work, so nothing races the harness boot.
-   A prompt is one line; an interior newline is refused. The shell still needs a
-   moment to be ready after `warm`.
+   A prompt is one line; an interior newline is refused.
+
+### Keep the dispatched line short
+
+A long line has more characters to lose, and a corrupted long line is harder to
+recognise in the process table. So the line that goes over the socket names a
+brief; it does not carry one.
+
+```sh
+# write the brief with the Write tool, then name it
+helm-cli prompt 259:1 'claude "read /tmp/brief-259.md and do exactly what it says"'
+```
+
+Write the brief to a file under `/tmp`, one file per ticket, named for the
+ticket. The file holds the three lines of substance and the fixed footer. The
+prompt holds one short sentence, which is also an exact and readable grep key
+for the `ps` check.
+
+`helm-cli prompt <session[:pane]> --file PATH` reads the line from a file, and
+drops a trailing newline. That helps with quoting, not with length: it is still
+one line, and it is still typed as keystrokes. Use it for a line that is awkward
+to quote in the shell. Use a brief file for a brief.
 
 ### Verify the line, every time
 
-A prompt into a just-warmed shell can arrive **in part**. Characters are lost
-mid-line, and the shell runs a corrupted command. Exit 0 says Helm took the
-line. It does not say a pane received it, and nothing is written back over the
-socket.
+A prompt into a just-warmed shell can arrive **in part**, and the 4 second wait
+does not prevent it. Characters are lost mid-line, and the shell runs a
+corrupted command. Exit 0 says Helm took the line. It does not say a pane
+received it, and nothing is written back over the socket.
 
 So after every dispatch, read the process table:
 
 ```sh
-ps -ax -o args= | grep -F 'claude "<the brief>"'
+ps -ax -o args= | grep -F 'read /tmp/brief-259.md'
 ```
 
 One match with the exact line means the dispatch landed. Report it. No match
@@ -113,7 +139,8 @@ issues through REST:
 gh api repos/<owner>/<repo>/issues/259 --jq '.title, .body'
 ```
 
-Three lines of substance, then this fixed footer:
+Write the result to `/tmp/brief-<ticket>.md`, with the Write tool. Three lines
+of substance, then this fixed footer:
 
 ```
 Read the ticket and the repo conventions before you start.
@@ -127,7 +154,11 @@ The footer is not optional, and the address prefix is the part that matters. A
 reply arrives in the orchestrator pane as if the human typed it. Without the
 prefix the orchestrator answers a worker as if it were the human.
 
-The human may supply a brief instead. Send that brief, with the same footer.
+The human may supply a brief instead. Write that brief to the file, with the
+same footer.
+
+Writing a brief file is not doing the work. It is composing the instruction, and
+that is the orchestrator's job.
 
 ## Status
 
@@ -174,7 +205,7 @@ One clause per column. Active voice, present tense, one word for one thing.
 
 | the human says | the orchestrator runs |
 |---|---|
-| **dispatch** — "start 259" | `grove new`, `helm-cli warm`, `helm-cli prompt`, then the `ps` check |
+| **dispatch** — "start 259" | write `/tmp/brief-259.md`, then `grove new`, `helm-cli warm`, `sleep 4`, `helm-cli prompt`, then the `ps` check |
 | **status** | `grove list`, `helm-cli ls --json`, `gh pr list`, `git log`; then one `prompt <worker> "status?"` per live worker |
 | **relay** — "tell 259 to also update the docs" | one `helm-cli prompt 259:1 '<the instruction>'`, then report `RELAY` |
 | **retire** — after a merge | propose `grove destroy <ticket>` in status; run it only when the human asks |
