@@ -46,6 +46,18 @@ providers, theme.
   statically (`$VAR`, backticks, a dot-glob that could match `.git`) falls to
   **confirm** — it fails closed, never open.
 
+  The session root is not the only free zone. The system temp dir counts (it
+  holds nothing worth restoring), and so does the session's **git worktree
+  family**: the main checkout plus every `git worktree` of the same repo, so a
+  worktree session copying a file back into the main tree is ordinary work
+  rather than a prompt. The list is re-read on a 5s TTL, so a worktree the agent
+  creates mid-run is inside the boundary straight away. Turn it off with
+  `WORKTREE_FAMILY = false`. For a directory git can't relate to the session —
+  a separate repo, a generated-config tree — list it in
+  `$OMP_DANGER_GUARD_FREE_ROOTS` (colon-separated, `~` allowed; `/` and `$HOME`
+  are refused). Every free root is free to work *inside*; deleting one whole is
+  still **confirm**, and `.git` is still **block**.
+
   Block tier gets no dialog on purpose: a prompt you can click through is exactly
   what prompt-fatigue and prompt-injection defeat. Escape hatch is you, in your
   own terminal.
@@ -53,7 +65,12 @@ providers, theme.
   Before any destructive **allow**, it writes a `refs/danger-guard/<ts>` snapshot
   commit (throwaway index, working tree untouched). That closes the gap in "git
   is my backup" — git recovers *committed* work, and the allow tier can destroy
-  uncommitted edits and untracked files. Recover with
+  uncommitted edits and untracked files. The snapshot is taken in the working
+  tree that *owns* the doomed path (`git rev-parse --show-toplevel` from there),
+  not in the session root — otherwise a worktree session deleting work in a
+  sibling checkout would commit the wrong tree entirely. Refs under
+  `refs/danger-guard/` are common to the repo, so they're visible from every
+  checkout. Recover with
   `git log refs/danger-guard/*` then `git checkout <ref> -- <path>`. It respects
   `.gitignore`, which is why deleting a gitignored `.env` is *confirm*, not allow.
 
@@ -73,7 +90,7 @@ providers, theme.
   the guard keeps ONE dialog open across that cap and blocks each attempt with a
   "re-run to keep waiting" reason until you answer.
 
-  Policy is tested: `make test` (131 cases in
+  Policy is tested: `make test` (138 cases in
   [`extensions/__tests__`](agent/extensions/__tests__/danger-guard.test.ts)).
   Tune `PROTECTED_BRANCHES`, `SNAPSHOT_BEFORE_DESTRUCTIVE`, and the rule tables at
   the top of the file; add a case to the table when you do.
