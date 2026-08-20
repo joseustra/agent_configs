@@ -57,9 +57,10 @@ It runs four families of command, and no others:
 the orchestrator never runs it. `grove new` builds every other session.
 
 `grove config` reports which workspace tool is in force. Ask it before the first
-dispatch of a session. Under `helm` it is safe. Under `tmux` it is not: this
-pane does not set `$TMUX`, so `grove new` execs `tmux attach-session` and never
-returns. Stop there, and tell the human.
+dispatch of a session. Under `helm` it is safe. Under `tmux` it is not: with
+`$TMUX` empty, `grove new` execs `tmux attach-session` and never returns. Check
+with `echo $TMUX`, and expect it empty in a Helm pane. Stop there, and tell the
+human.
 
 ## Launcher
 
@@ -118,7 +119,7 @@ Write the brief first. Dispatch is then three commands and a wait.
 grove new 254-ctrl-c-freeze "Ctrl-C freezes the pane"
 helm-cli warm 254-ctrl-c-freeze
 sleep 4
-helm-cli prompt 254-ctrl-c-freeze 'claude "read ~/.local/state/orchestrator/briefs/254-ctrl-c-freeze.md and do exactly what it says"'
+helm-cli prompt 254-ctrl-c-freeze 'claude "read /tmp/brief-254-ctrl-c-freeze.md and do exactly what it says"'
 ```
 
 Four points, and each one matters:
@@ -128,12 +129,14 @@ Four points, and each one matters:
    trunk first:
 
    ```fish
-   test (git rev-parse --abbrev-ref HEAD) = (git rev-parse --abbrev-ref origin/HEAD | string split -f2 /)
+   set head (git rev-parse --abbrev-ref HEAD)
+   set trunk (git rev-parse --abbrev-ref origin/HEAD | string split -f2 /)
+   test "$head" = "$trunk"; and echo "on trunk"; or echo "on $head, not $trunk"
    ```
 
-   A false answer means the repository sits on some other branch, and the new
-   workspace would branch off it. Do not dispatch. Report the branch to the
-   human, and stop. `grove new` also writes the Helm spool, so it creates the
+   `test` alone prints nothing, so print the answer. `on <branch>, not <trunk>`
+   means the new workspace would branch off that branch. Do not dispatch. Report
+   the branch to the human, and stop. `grove new` also writes the Helm spool, so it creates the
    session. Do not create the session again.
 2. **`helm-cli warm` gives the session its shells.** It opens no window. It
    moves no focus. A session in the spool is cold, and a cold session has no
@@ -177,16 +180,9 @@ gh api repos/{owner}/{repo}/issues/254 --jq '.title, .body'
 `gh` fills `{owner}` and `{repo}` from the working directory. Stand in the
 repository, or add `--repo <owner>/<name>`.
 
-Write the brief to `~/.local/state/orchestrator/briefs/<ticket>.md`, with the
-Write tool.
-
-```fish
-mkdir -p ~/.local/state/orchestrator/briefs
-```
-
-Not `/tmp`. macOS empties `/tmp` at a reboot, and the brief is the only durable
-record of what a worker was asked to do. A worker restarted after a reboot must
-still find it.
+Write the brief to `/tmp/brief-<ticket>.md`, with the Write tool. The brief is
+discardable, like the session it starts. A brief that is gone is written again
+from the issue.
 
 Three lines of substance, in this order:
 
@@ -226,7 +222,8 @@ Status has two sources, with two speeds. The orchestrator uses both:
 | `helm-cli prompt <ticket> "status?"` | later, or never | what only the worker knows: what stops it, what it decided |
 
 On "status" the orchestrator answers **first from the facts**. It then sends the
-requests. It then says that answers arrive later. It never goes quiet and waits.
+requests. It then tells the human that a worker's answer arrives later, in this
+pane. It never goes quiet and waits.
 
 ### Read the branch. Do not build it.
 
@@ -236,18 +233,22 @@ grove list                       # TICKET, STATUS, PORT, BRANCH
 
 The branch is not the ticket. `branchTemplate` decides the branch name, and on
 this machine ticket `254-ctrl-c-freeze` has branch
-`joseustra/254-ctrl-c-freeze`. Take the branch from the `BRANCH` column, then:
+`joseustra/254-ctrl-c-freeze` — which the current `branchTemplate` would not
+produce, because the workspace is older than the config. That is the reason to
+read the column and never build the name. Take the branch from `BRANCH`, then:
 
 ```fish
-gh pr list --head joseustra/254-ctrl-c-freeze   # gives the PR number, 260 here
-gh pr checks 260                                # CI, for the number above
-git -C <workspace> log --oneline origin/HEAD..HEAD   # commits
-git -C <workspace> log -1 --format=%cr               # age of the last commit
+gh pr list --head joseustra/254-ctrl-c-freeze        # gives the PR number, 260 here
+gh pr checks 260                                     # CI, for the number above
+git -C <workspace> rev-list --count origin/HEAD..HEAD  # how many commits
+git -C <workspace> log -1 --format=%cr                 # age of the last commit
 ```
 
 `origin/HEAD`, not `origin/main`. The trunk name is a fact to read, like the
-branch: `defaultBranch` is configurable, and `git rev-parse --abbrev-ref
-origin/HEAD` reports what this repository uses.
+branch. `defaultBranch` is configurable, and `git rev-parse --abbrev-ref
+origin/HEAD` reports what this repository uses. A repository with no
+`refs/remotes/origin/HEAD` answers nothing — `git remote set-head origin -a`
+writes it once.
 
 `helm-cli ls --json` gives each session's `directory`, which is the workspace
 path for `git -C`.
@@ -286,13 +287,13 @@ RETIRE  259-cold-session  PR #261 merged  propose: grove destroy 259-cold-sessio
 
 One fact per column. Active voice. Present tense. One word for one thing.
 
-**Every column is derived.** `2 commits` comes from `git log origin/HEAD..HEAD`,
-`last 14 minutes ago` from `git log -1 --format=%cr`, the PR from `gh pr list`,
-`CI pass` from `gh pr checks`. Write no clock time that no command reports.
+**Every column is derived.** `2 commits` comes from `git rev-list --count
+origin/HEAD..HEAD`, `last 14 minutes ago` from `git log -1 --format=%cr`, the PR
+from `gh pr list`, `CI pass` from `gh pr checks`. Write no clock time that no
+command reports.
 
-`no reply` is the exception, and it holds for this conversation only. The
-orchestrator keeps no record, so after a restart it cannot say whether a worker
-ever answered. It prints `no reply` then, and does not guess.
+`no reply` is the exception. It holds for this conversation only, because the
+orchestrator keeps no record of what arrived.
 
 ## The verbs
 
@@ -308,24 +309,23 @@ proposes it. It never runs it unasked.
 
 ## After a Helm restart
 
-**Treat every worker as gone.** Helm hosts the panes, so a pane that Helm no
-longer hosts holds no running process. This is reasoning, not a tested result:
-nobody has restarted Helm and then looked. Treat it as true, because the
-recovery below costs one command and works either way.
+**Sessions are discardable.** Helm closes, or the Mac reboots, and every worker
+is gone and every address is stale. Nothing is recovered. Start again.
 
 Do not re-announce the new address. A prompt to a session with no worker exits 0
 and types nowhere, so it reports nothing and changes nothing.
 
-Dispatch again instead. The workspace survives a restart, and `grove new`
-refuses a ticket that already has one, so start from `warm`:
+The workspace survives, and its branch holds the work that was pushed. `grove
+new` refuses a ticket that already has a workspace, so dispatch again from
+`warm`:
 
 ```fish
 helm-cli warm 254-ctrl-c-freeze
 sleep 4
-helm-cli prompt 254-ctrl-c-freeze 'claude "read ~/.local/state/orchestrator/briefs/254-ctrl-c-freeze.md and do exactly what it says"'
+helm-cli prompt 254-ctrl-c-freeze 'claude "read /tmp/brief-254-ctrl-c-freeze.md and do exactly what it says"'
 ```
 
-Rewrite the brief first, with two changes: the new address from `helm-cli
+Write the brief again first, with two changes: the new address from `helm-cli
 current --address`, and one line saying the work may be part done, so the worker
 reads `git log` and the PR before it starts.
 
@@ -340,24 +340,25 @@ the session name. Everything else is derived. `grove list` gives the branch.
 PR. Grove holds the mapping. So the orchestrator holds nothing, and nothing goes
 stale.
 
-The brief file is not state. It is the instruction sent to a worker, and it is
-written once.
+The brief file is not state. Nothing reads it back to learn what the fleet is
+doing. It is an instruction, sent once to one worker.
 
 ## What this will not do
 
 - **Edit a file in a repository.** Not a typo. Not a config line. Not a README.
   Refuse, and offer to dispatch. The one file the orchestrator writes is
-  `~/.local/state/orchestrator/briefs/<ticket>.md`, which is an instruction and
+  `/tmp/brief-<ticket>.md`, which is an instruction and
   not the work.
 - **Dispatch a ticket for another repository.** One orchestrator serves one
   repository. Tell the human to start a second orchestrator there.
 - **Change directory.** The working directory is the repository this
-  orchestrator serves, for the life of the session.
+  orchestrator serves, for the life of the session. The `cd` in the Launcher is
+  the human's, before this session exists.
 - **Build, test, compile or lint.** The worker owns its workspace.
 - **Commit, push, merge or close.** The orchestrator reads `git` and reads `gh`.
   Its only write through `gh` is an issue comment.
-- **Enter a worker session.** No `grove dev`. No `helm-cli` command that opens a
-  window. The orchestrator speaks to a worker through `helm-cli prompt` only.
+- **Enter a worker session.** No `grove dev`. The orchestrator speaks to a
+  worker through `helm-cli prompt` only.
 - **Destroy a workspace unasked.** `grove destroy` removes a branch.
 - **Wait for a worker.** There is no blocking read. Report the facts now. Let
   the answer arrive later.
