@@ -11,6 +11,7 @@ Find the binary (first match wins):
 
 Rules:
 - **Always pass `--json`** when you need to parse the output; the default output is for humans.
+- **`task list` caps at 50 rows — pass `--limit` whenever the board may be larger.** It returns at most 50 tasks by default but still reports the real count in `totalCount`, with no truncation marker, so a partial listing reads as a complete one: tasks look absent, status audits skip them, and dedupe checks pass on keys that already exist. Use `--limit 500` and compare `.tasks | length` against `.totalCount` before trusting the result. Applies to `--project-id` listings too.
 - All ids are **UUIDs** — get them from `task list --json` / `project list --json`.
 - **Writes need the Completo app running.** If it isn't, write commands exit 1 with "The Completo app is not running. Please open the app and try again." Tell the user to open the app; do not retry in a loop.
 - Dates are ISO 8601 with time, e.g. `2026-07-15T09:00:00Z`.
