@@ -1,6 +1,6 @@
 ---
 name: helm-cli
-description: Create and manage Helm sessions, splits and projects from the shell with the `helm-cli` command — new/ls/rm/projects/current/prompt/warm. Use whenever a session needs to be created for an agent to work in, when an agent needs to be started in a session from a script, when asking which project the current pane belongs to, when sending a prompt to another agent's pane, when a session should be displayed as something other than its filename, or when scripting Helm's spool.
+description: Create and manage Helm sessions, splits and projects from the shell with the `helm-cli` command — new/ls/rm/projects/current/prompt/warm/close. Use whenever a session needs to be created for an agent to work in, when an agent needs to be started in a session from a script, when a finished session needs its shells taken away and its descriptor removed, when asking which project the current pane belongs to, when sending a prompt to another agent's pane, when a session should be displayed as something other than its filename, or when scripting Helm's spool.
 ---
 
 # Helm CLI
@@ -11,7 +11,8 @@ notices within a second, **without taking focus** — nothing here opens a windo
 and a session created this way stays cold until someone enters it.
 
 It also speaks to a *running* Helm over `~/.config/helm/mcp.sock`, which is what
-`prompt` uses to type into another agent's pane. Two doors, and they are not
+`prompt`, `warm` and `close` use — typing into another agent's pane, and giving
+a session its shells or taking them away. Two doors, and they are not
 interchangeable: the spool is what a session *is*, the socket is *do this now*.
 
 Find the binary (first match wins):
@@ -45,12 +46,13 @@ create without `--project` rather than passing an empty string.
 |---|---|
 | `helm-cli new [name] [--dir PATH] [--project WORD] [--label WORD] [--pane CMD [--title T] [--width N]]...` | name defaults to the directory's basename, `--dir` to the working directory; prints the descriptor's path |
 | `helm-cli ls [--project WORD] [--json]` | every session, alphabetical |
-| `helm-cli rm <name>` | removes the descriptor and its comments; **never the directory** |
+| `helm-cli rm <name>` | removes the descriptor and its comments; **never the directory, and never a shell** |
 | `helm-cli projects [--json]` | the words in use, and how many sessions name each |
 | `helm-cli current [--project] [--address] [--json]` | where you are standing |
 | `helm-cli prompt <session[:pane]> <line>` | types a line into a pane and presses Return |
 | `helm-cli prompt <session[:pane]> --file PATH` | the same, with the line read from a file |
 | `helm-cli warm <session>` | gives a cold session its shells, showing nothing |
+| `helm-cli close <session>` | takes them away again — the descriptor survives |
 | `helm-cli help` | full usage |
 
 Exit codes: **0** done or found · **1** nothing to report · **2** refused ·
@@ -75,6 +77,13 @@ helm-cli prompt feature:1 "start on #259, reply to me at $(helm-cli current --ad
 **There is no separate "send a command" verb, and none is needed.** `prompt` is
 keystrokes into a pane, so a shell receiving `claude` starts Claude exactly as a
 running agent receiving a sentence gets a prompt. The pane need not hold an agent.
+
+**Both lines name `:1`, and the first one has to.** The pane-less form resolves to
+the most recently reporting agent pane, and a freshly warmed session has none — a
+bare shell has never reported, so there is no target, and the line is dropped
+while `prompt` still exits 0. Name the pane until something in that session is
+reporting; a row `warm` builds from a one-pane descriptor is pane 1, and nothing
+has split it yet.
 
 `warm` spawns shells and **runs nothing**. A `--pane` command in the descriptor
 is still only offered on a key, as it is after a relaunch; whatever should run is
@@ -109,6 +118,43 @@ wait on, so **the check is what makes it safe**. If the line arrived mangled,
 kill what it started before sending anything else. Keep the line short: less text
 is less to corrupt, and a long brief belongs in a file the prompt names.
 
+## Retiring a session when the work is done
+
+```sh
+helm-cli close feature          # the shells
+helm-cli rm feature             # and then the descriptor
+```
+
+`close` is `warm` backwards, over the same socket: it frees the session's panes,
+ends whatever was running in them, and leaves the descriptor exactly where it is.
+The session is **cold**, not gone — warming it again rebuilds its shape from the
+file, and there is no third state here either. It takes a session and never
+`session:pane`, for the reason `warm` does: a session goes cold whole. Closing
+one that is already cold does nothing and is not an error.
+
+**`close` is the only thing here that ends a process, and `rm` is not one.**
+Deleting a descriptor deletes a file. A session with shells in it deliberately
+outlives its descriptor, because a script removing a file is not a script asking
+for somebody's agent to be killed — so `rm` on a warm session leaves a row on
+Helm's dashboard that `helm-cli ls` no longer lists. That is honest and it is
+almost never what the caller wanted. **Say `close` first.**
+
+This is the end of the loop that `new`/`warm`/`prompt` begins, and the shape a
+script that dispatches work should finish with:
+
+```sh
+helm-cli close "$session" && helm-cli rm "$session"
+grove destroy "$workspace"
+```
+
+Order matters in one direction only: `close` before `rm`, because after `rm`
+there is still a name to close but no descriptor to say what was closed. Nothing
+stops you closing a session and keeping its descriptor — that is a session put
+back in the drawer, ready to be warmed again.
+
+A session whose last shell exits on its own goes cold without being asked, so a
+worker that ends by exiting its own shell needs no `close` — only the `rm`.
+
 ## Talking to another agent
 
 ```sh
@@ -120,6 +166,11 @@ helm-cli prompt api-review 'review the diff, reply to me at ui-work:1'
 line, then Return. Name a pane (`api-review:2`) or name only the session, in
 which case Helm picks the pane Send would have picked — the most recently
 reporting agent pane.
+
+The pane-less form is for a session where an agent is **already running**, which
+is what the send-target rule needs to pick anything. Send greys itself out in
+that state; `prompt` cannot, so it types nowhere and exits 0. Anything aimed at a
+session before its agent starts names its pane.
 
 `current --address` prints this pane's address, which is the thing to hand
 another agent so it can answer you. It is read from `HELM_PANE` and **never
@@ -166,7 +217,9 @@ and exit 0 while typing nothing:
   one: `helm-cli warm <session>` first, or open the session in Helm.
 - **The pane number is not there.** `feature-2:7` in a two-pane session.
 - **No pane has reported**, and you named no pane. The unnamed form needs
-  something for the send-target rule to pick; the named form does not.
+  something for the send-target rule to pick; the named form does not. This is
+  the other common one, and it is what a warmed-but-not-yet-started session looks
+  like: warm and addressable, with nothing in it that has ever reported.
 - **A second Helm holds the socket.** There is one `mcp.sock` and it is
   first-come: a Helm that starts while another is running declines to bind and
   has no MCP surface at all. If prompts vanish and agents also stop reporting,
@@ -212,9 +265,14 @@ app (⇧⌘D) and is deliberately never written back to the file.
   `env` or `panes`, edit the JSON directly — the watcher picks it up — or remove
   the session and create it again.
 - **Open a session.** Nothing here takes focus or opens a window. `warm` gives a
-  cold session shells and still shows you nothing.
-- **Create or remove a directory.** `--dir` is recorded, not made, and `rm` never
-  touches the work directory.
+  cold session shells and still shows you nothing; `close` takes them away
+  without showing you anything either.
+- **Kill a session's shells with `rm`.** `rm` is a file, `close` is the
+  processes. See *Retiring a session* above.
+- **Close one pane of a session.** `close` takes a session whole. Closing a
+  single pane is a live gesture in the app.
+- **Create or remove a directory.** `--dir` is recorded, not made, and neither
+  `rm` nor `close` touches the work directory.
 - **Name an agent.** There are no nicknames and no registry. An address is the
   pair `(session, pane)` Helm already has, and nothing else.
 - **Confirm a prompt arrived.** The socket is one-way. See exit 0's claim above.
