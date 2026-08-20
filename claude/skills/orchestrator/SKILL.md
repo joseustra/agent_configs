@@ -77,7 +77,7 @@ else
 end
 
 helm-cli warm orchestrator
-helm-cli prompt orchestrator 'claude --model sonnet'
+helm-cli prompt orchestrator:1 'claude --model sonnet'
 ```
 
 `helm-cli current --project` exits 1 when there is no project to join. Create
@@ -98,18 +98,30 @@ set addr (helm-cli current --address)       # agent_configs:1
 Exit 1 means this shell is not a Helm pane. Stop, and tell the human to start
 the session with the Launcher. Without an address no worker can reply.
 
-**Address a worker by session name, with no pane number.** Helm then selects
-the pane that Send selects.
+**Address a running worker by session name, with no pane number.** Helm then
+selects the pane that Send selects.
 
 ```fish
-helm-cli prompt 254-ctrl-c-freeze 'a line'   # correct
-helm-cli prompt 254-ctrl-c-freeze:1 'a line' # a guess
+helm-cli prompt 254-ctrl-c-freeze 'a line'   # correct, once the worker is running
+helm-cli prompt 254-ctrl-c-freeze:1 'a line' # a guess, once the worker is running
 ```
 
 A pane number is a serial. Helm hands it out at open or at split. The descriptor
 does not hold it. `helm-cli ls --json` reports a pane's width and nothing else.
 So a pane number written down is a guess. A guessed pane number sends a line to
 the wrong worker.
+
+**The one line that must name its pane is the first one.** With no pane number
+Helm falls back to the pane Send would pick, and that is *the most recently
+reporting agent pane* — so a session where no agent has reported yet has no
+target at all, and the line is dropped. A freshly warmed session is exactly
+that: a bare shell that has never reported. The prompt exits 0, the socket
+carries no receipt, and nothing arrives anywhere.
+
+So the line that starts `claude` names `:1`, and every line after it — sent to a
+worker that is running and reporting — does not. `:1` is not a guess there: a
+row `warm` builds from a one-pane descriptor is pane 1, and nothing has split
+it yet.
 
 ## Dispatch
 
@@ -119,7 +131,7 @@ Write the brief first. Dispatch is then three commands and a wait.
 grove new 254-ctrl-c-freeze "Ctrl-C freezes the pane"
 helm-cli warm 254-ctrl-c-freeze
 sleep 4
-helm-cli prompt 254-ctrl-c-freeze 'claude "read /tmp/brief-254-ctrl-c-freeze.md and do exactly what it says"'
+helm-cli prompt 254-ctrl-c-freeze:1 'claude "read /tmp/brief-254-ctrl-c-freeze.md and do exactly what it says"'
 ```
 
 Four points, and each one matters:
@@ -322,7 +334,7 @@ new` refuses a ticket that already has a workspace, so dispatch again from
 ```fish
 helm-cli warm 254-ctrl-c-freeze
 sleep 4
-helm-cli prompt 254-ctrl-c-freeze 'claude "read /tmp/brief-254-ctrl-c-freeze.md and do exactly what it says"'
+helm-cli prompt 254-ctrl-c-freeze:1 'claude "read /tmp/brief-254-ctrl-c-freeze.md and do exactly what it says"'
 ```
 
 Write the brief again first, with two changes: the new address from `helm-cli
