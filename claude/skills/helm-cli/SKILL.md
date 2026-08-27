@@ -45,7 +45,7 @@ create without `--project` rather than passing an empty string.
 | Command | Notes |
 |---|---|
 | `helm-cli new [name] [--dir PATH] [--project WORD] [--label WORD] [--pane CMD [--title T] [--width N]]...` | name defaults to the directory's basename, `--dir` to the working directory; prints the descriptor's path |
-| `helm-cli ls [--project WORD] [--json]` | every session, alphabetical |
+| `helm-cli ls [--project WORD] [--panes] [--json]` | every session, alphabetical; `--panes` adds what is running in each |
 | `helm-cli rm <name>` | removes the descriptor and its comments; **never the directory, and never a shell** |
 | `helm-cli projects [--json]` | the words in use, and how many sessions name each |
 | `helm-cli current [--project] [--address] [--json]` | where you are standing |
@@ -59,6 +59,43 @@ Exit codes: **0** done or found · **1** nothing to report · **2** refused ·
 **3** the arguments were not a command.
 
 Pass `--json` when parsing; the default output is for people.
+
+## Finding out where to send something
+
+```sh
+helm-cli ls --panes
+```
+
+```
+api    [helm] /code/api
+  :1   claude working
+  :2   <blank>
+
+lucra  [helm] /code/lucra
+  <cold>
+```
+
+The number after the colon is the address `prompt` takes. Read the right-hand
+column as:
+
+- **`<cold>`** — no shells. `warm` it before prompting; a prompt aimed here exits
+  0 and types nowhere.
+- **`<blank>`** — a shell at its prompt. Free.
+- **`<busy>`** — a shell running something Helm cannot name. Helm discovers
+  agents, not processes, so a pane running an editor holds no agent and is still
+  not free.
+- **`claude working`** — a harness and what it is doing, in the same five words
+  the dashboard uses: `working`, `waiting`, `idle`, `dead`, `unknown`. A pane can
+  hold more than one, and then it names them all.
+
+**Ask this before deciding whether to `warm` or just `prompt`.** It is one call
+in place of prompting blind and watching what happens.
+
+`ls` without the flag is unchanged and asks Helm nothing. `--panes --json` puts
+the same information under `warm` and `live` — `live` is the running row, while
+`panes` stays the shape the descriptor declares. Helm not listening means every
+session is cold, which is true rather than an error: exit 0, with a note on
+stderr.
 
 ## Standing a worker up from a script
 
