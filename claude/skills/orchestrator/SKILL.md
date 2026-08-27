@@ -24,6 +24,7 @@ Five words, one meaning each:
 | **worker** | the Claude session in that workspace |
 | **brief** | the file that tells a worker what to do |
 | **bead** | the orchestrator's record of one ticket, in its own beads DB |
+| **address** | where a line is sent. Always `<pane_name>:<pane_number>`. Written `<addr>` in a brief and `$addr` in a command |
 
 ## Mission control serves many repositories
 
@@ -144,10 +145,49 @@ The home repo commonly has no project. That is normal; take the `else` branch.
 `--label` is display only. `rm` and `prompt` take the name, so every project can
 hold an `orchestrator`.
 
+## Helm CLI is the only channel
+
+**Every line between two agents goes through `helm-cli prompt`. There is no
+other way, in either direction.**
+
+```fish
+helm-cli prompt <name>:<pane> "<one line>"
+```
+
+**Both addresses in that line carry a pane number.** An address is
+`<pane_name>:<pane_number>` — `00_MissionControl:2`, `helm-300:1` — and it is
+read, never composed: `helm-cli current --address` for your own,
+`helm-cli ls --panes` for anyone else's. A bare session name is not an address.
+Helm may guess a pane for it, and the guess is a different pane on the next
+relaunch, so the line lands where nobody is reading.
+
+**That is what `<addr>` means, everywhere below.** The rest of this file writes
+the orchestrator's own address as `<addr>` in a brief, as `$addr` in a command,
+and as `reply-addr=` in a bead. All three are the same thing: one
+`<pane_name>:<pane_number>` string, straight from `helm-cli current --address`.
+Wherever a placeholder stands for an address — `<addr>`, `$addr`,
+`<session-or-address>`, `$ticket:$pane`, `<name>:<pane>` — it expands with the
+pane number attached. There is no short form of an address.
+
+A worker's harness offers routes that look like they would work — a
+`SendMessage` tool, a subagent, a task handoff, a shared file, an MCP server.
+**None of them reach this pane.** They are internal to that harness's own
+process tree, and the orchestrator is a different process in a different
+session. A reply sent that way is not delayed; it is lost, and the worker
+believes it reported.
+
+So the orchestrator says so, in the brief and in every relay, in the imperative
+and with the command written out. A worker that was only told to "reply to
+`<addr>`" will reach for its internal messaging, because that is what the word
+*reply* means inside a harness. Give it the command, not the address alone.
+
+The same holds for the orchestrator: it never spawns a subagent to talk to a
+worker, and it never answers a worker through anything but `helm-cli prompt`.
+
 ## Addresses, and reading the fleet
 
-An address is `session:pane`. The orchestrator reads its own. It never builds
-one.
+An address is `<pane_name>:<pane_number>`, as above. The orchestrator reads its
+own. It never builds one.
 
 ```fish
 set addr (helm-cli current --address)       # 00_MissionControl:2
@@ -461,12 +501,39 @@ Read the ticket and the repo conventions before you start.
 Open a PR. Never commit to main.
 Reply to <addr> at three moments only: when the PR is open, when you are
 blocked, and when a merge or any other instruction from <addr> is done.
-Start every reply with your own address. Keep replies to one line.
+
+Send every reply by running this command in your own shell:
+
+    helm-cli prompt <addr> "<your address>  <one line>"
+
+That command is the ONLY way to reach <addr>. Do not use your harness's own
+messaging to reply — not SendMessage, not a subagent, not a task handoff, not
+a file, not an MCP tool. Those stay inside your session and <addr> never sees
+them. If helm-cli is missing or exits non-zero, stop and say so in your own
+pane. Do not invent another route.
+
+Both addresses are `<pane_name>:<pane_number>`, never a bare name. <addr> is
+already written that way above. For your own, run `helm-cli current --address`
+once, use exactly what it prints, and start every reply with it:
+
+    helm-cli prompt <addr> "helm-300:1  PR #301 open, tests green"
+
+Keep replies to one line.
 ```
 
 The third moment is the one that was missing. Without it a worker told to merge
 merges and goes silent, and the orchestrator waits for a report that was never
 requested.
+
+**The command is in the footer because the address alone is not enough.** Told
+only to "reply to `00_MissionControl:2`", a worker reaches for the messaging its
+harness gives it, which goes nowhere the orchestrator can read. Naming
+`helm-cli prompt` and naming what not to use is what makes the reply arrive.
+
+**Write `<addr>` into the footer with its pane number**, exactly as
+`helm-cli current --address` printed it. The orchestrator's pane is not pane 1,
+and a footer carrying a bare session name gives the worker no address to prefix
+and no address to send to.
 
 The address prefix does necessary work. A reply arrives in the orchestrator pane
 as if the human typed it; without the prefix the orchestrator answers a worker
@@ -482,17 +549,30 @@ instruction, and that is the orchestrator's job.
 ## Relay
 
 ```fish
-helm-cli prompt $ticket "<the instruction>. Reply to $addr when it is done, or if you are blocked."
+set pane (helm-cli ls --panes --json | jq -r --arg s $ticket \
+    '.[] | select(.name==$s) | .live[] | select((.agents|length)>0) | .pane' | head -n1)
+helm-cli prompt $ticket:$pane "<the instruction>. Reply to $addr when it is done, or if you are blocked."
 ```
+
+**Read the worker's pane, do not leave it off.** `$ticket:$pane` is the
+address; `$ticket` alone is a session name, and Helm's choice of pane for it is
+not the orchestrator's to assume. Empty `$pane` means no live agent — do not
+prompt, report `no agent`.
 
 **Every relay names the reply, every time.** The brief's footer covers the
 standing moments; a new instruction is a new moment, and a worker has no
 standing instruction to report on something it was not told to report on. State
 the address in the line itself — do not assume the worker still has it.
 
-Address by session name alone here: the worker is running and reporting, so
-Helm picks the pane Send would pick. Confirm it is running with `ls --panes`
-first if there is any doubt.
+**And name the channel with it.** A relay is a line the worker reads fresh, with
+no footer attached, so spell the command out again:
+
+```fish
+helm-cli prompt $ticket "<the instruction>. Reply by running: helm-cli prompt $addr \"<your address> <one line>\" — that command only, not your own messaging tools."
+```
+
+That `ls --panes` call does double duty: it proves an agent is alive before the
+line is sent, and it yields the pane number the line is addressed to.
 
 Then `bd update <id> --notes="relayed: <instruction>"`, and report `RELAY`.
 
@@ -506,7 +586,7 @@ Status has two sources, at two speeds. Use both, in this order:
 | source | speed | tells you |
 |---|---|---|
 | `bd list --status=in_progress`, `helm-cli ls --panes`, `grove list`, `git`, `gh` | now | the fleet, which agents are alive, the branch, the commits, the PR, CI |
-| `helm-cli prompt <ticket> "status? reply to <addr>"` | later, or never | what only the worker knows: what stops it, what it decided |
+| `helm-cli prompt <ticket>:<pane> "status? reply to <addr>"` | later, or never | what only the worker knows: what stops it, what it decided |
 
 **Answer from the facts first.** Then send the requests. Then say a worker's
 answer arrives later, in this pane. Never go quiet and wait.
@@ -542,9 +622,10 @@ changes, so a branch name you constructed is a guess.
 
 `grove list`'s `STATUS` describes the workspace, not the worker: it shows
 `running` for a workspace whose `claude` process does not exist. **`ls --panes`
-is the one that knows.** Send `status?` to panes showing `claude` in any state.
-Report `<cold>` and `<blank>` sessions as **`no agent`** — that is a fact, and
-it is different from `no reply`.
+is the one that knows.** Send `status?` to panes showing `claude` in any state,
+addressed `<name>:<pane>` with the pane taken from that same output. Report
+`<cold>` and `<blank>` sessions as **`no agent`** — that is a fact, and it is
+different from `no reply`.
 
 ### Two rules
 
@@ -676,7 +757,7 @@ origin/HEAD..HEAD`, `last 14m ago` from `git log -1 --format=%cr`, the PR from
 | **dispatch** — "start 300", "work on <issue url>" | the six steps: read issue, check trunk, write brief, `grove new`, `warm`+`sleep 4`+`prompt`+verify, `bd create` + `in_progress` |
 | **research** — "a session with no code" | `helm-cli new --dir <target repo> --project <its project>`, `warm`, stop. `bd create` + `in_progress` |
 | **status** | `bd list --status=in_progress`, `helm-cli ls --panes`, `grove list`, `gh pr list/checks`, `git log`; then `status?` to live agents only |
-| **relay** — "tell 300 to also update the docs" | one `helm-cli prompt` **naming the reply address**, then `bd update --notes`, then `RELAY` |
+| **relay** — "tell 300 to also update the docs" | read the pane, one `helm-cli prompt <name>:<pane>` **naming the reply address and the `helm-cli prompt` command**, then `bd update --notes`, then `RELAY` |
 | **merge** — "ask the agent to merge" | a relay. The worker merges its own PR. The orchestrator never runs `gh pr merge` |
 | **close an issue** — "close 292" | `gh issue close --repo <target> --comment "<why>"`, then `bd close` |
 | **retire** — after a merge | `helm-cli close`, `helm-cli rm`, `grove destroy`, `bd close`. Propose first; run when asked |
@@ -698,13 +779,18 @@ origin/HEAD..HEAD`, `last 14m ago` from `git log -1 --format=%cr`, the PR from
   reports back, because the relay asked it to.
 - **Enter a worker session.** No `grove dev`. It speaks through
   `helm-cli prompt` only.
+- **Talk to an agent by any other means.** No subagent, no SendMessage, no
+  shared file. `helm-cli prompt` in both directions, and every brief and every
+  relay says so to the worker.
 - **Destroy a workspace unasked.** `grove destroy` removes a branch.
 - **Wait for a worker.** There is no blocking read. Report the facts now; let
   the answer arrive later.
 - **Report what a worker intends.** It reports commits, PRs, CI results, pane
   state and replies. Not progress it cannot see.
 - **Build an address or a pane number.** Read them with
-  `helm-cli current --address` and `helm-cli ls --panes`.
+  `helm-cli current --address` and `helm-cli ls --panes`. Every address it
+  writes or sends to is `<pane_name>:<pane_number>`; a bare session name is
+  never an address.
 - **Verify a dispatch by its exit code.** Verify with `ls --panes`. Report the
   line as sent, never as received.
 - **Run `grove cleanup`.** It reads `[y/N]` from stdin. Leave it to the human.
