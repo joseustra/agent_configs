@@ -181,6 +181,39 @@ table("outward and irreversible", [
   ["acli jira workitem delete DOC-1", "confirm"],
 ]);
 
+// `gh api` used to be judged by the presence of a `-f` field flag, which made every
+// GraphQL READ — the only way to fetch review threads, check runs or PR state in one
+// round trip — open a dialog. Method and endpoint decide it now; for graphql, the
+// operation keyword does.
+table("gh api: reads are free, writes ask", [
+  [
+    `gh api graphql -f query='query{repository(owner:"o",name:"r"){pullRequest(number:1){reviewThreads(first:100){nodes{isResolved path line}}}}}' --jq '.data'`,
+    "allow",
+  ],
+  [
+    `gh api graphql -f query='\n{ repository(owner:"o", name:"r") { pullRequest(number:1) {\n  reviewThreads(first:50) { totalCount nodes { isResolved path } } } } }' -q '.data'`,
+    "allow",
+  ],
+  ['gh api "repos/o/r/branches/base/protection" -q .required_status_checks', "allow"],
+  ["gh api repos/o/r/commits/abc/check-runs --paginate", "allow"],
+  ["gh api -X GET search/issues -f q=is:pr", "allow"],
+  // Commenting is what the typed `gh pr comment` already does for free.
+  ["gh api repos/o/r/issues/1/comments -f body=lgtm", "allow"],
+  ["gh api repos/o/r/pulls/1/comments/9/replies -f body=fixed", "allow"],
+  [`gh api graphql -f query='mutation { resolveReviewThread(input:{threadId:"T"}) { thread { id } } }'`, "allow"],
+  // Everything else a write can reach still asks.
+  [`gh api graphql -f query='mutation { mergePullRequest(input:{pullRequestId:"P"}) { clientMutationId } }'`, "confirm"],
+  ["gh api repos/o/r/collaborators/eve -X PUT -f permission=admin", "confirm"],
+  ["gh api repos/o/r/pulls -f title=x -f head=y -f base=main", "confirm"],
+  ["gh api -X DELETE repos/o/r/git/refs/heads/x", "confirm"],
+  // An unreadable body keeps its prompt — unless the ENDPOINT already bounds it to a
+  // comment, where the body is the comment text and nothing else.
+  ['gh api graphql -f query="$Q"', "confirm"],
+  ["gh api graphql -f query=@op.graphql", "confirm"],
+  ["gh api repos/o/r/pulls --input pr.json", "confirm"],
+  ["gh api repos/o/r/issues/1/comments --input body.json", "allow"],
+]);
+
 table("secrets: reading is fine, leaving is not", [
   ["cat .env", "allow"],
   ["grep -r API_KEY .env", "allow"],

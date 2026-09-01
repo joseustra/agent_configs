@@ -765,6 +765,160 @@ function gitPushVerdict(words: Word[], root: string): Verdict | null {
   return ALLOW;
 }
 
+// ── gh api ───────────────────────────────────────────────────────────────────
+//
+// `gh api` is the raw escape hatch for everything the typed `gh` commands gate above,
+// so writes through it have to ask. But the old rule asked whenever it saw a `-f`/`-F`
+// field, and that reads a GraphQL QUERY — the standard way to fetch review threads,
+// check runs and PR state — as a write, because gh POSTs every graphql request.
+// Method and endpoint are what decide it, and for graphql the operation keyword does.
+
+const GH_FIELD_FLAG = /^(?:-f|-F|--field|--raw-field)$/;
+const GH_FIELD_ASSIGN = /^(?:--field|--raw-field)=([\s\S]+)$/;
+const GH_METHOD_ASSIGN = /^--method=([\s\S]+)$/;
+/** Flags whose VALUE is the next word, so it must not be mistaken for the endpoint. */
+const GH_FLAG_WITH_VALUE = /^(?:-H|--header|-q|--jq|-t|--template|--cache|--input|-p|--preview|--hostname)$/;
+const GH_WRITE_METHOD = /^(?:POST|PUT|PATCH|DELETE)$/i;
+
+/**
+ * Endpoints and mutations that only leave a COMMENT or a review thread's state behind.
+ * The typed `gh pr comment` / `gh pr review` are already free — they are ordinary agent
+ * work, editable and deletable after the fact — so the raw-api spelling of the same
+ * action is free too. Anything else a write can reach is not.
+ */
+const GH_COMMENT_ENDPOINT =
+  /(?:^|\/)(?:issues|pulls)\/\d+\/comments$|(?:^|\/)(?:issues|pulls)\/comments\/\d+$|(?:^|\/)pulls\/\d+\/(?:reviews|comments\/\d+\/replies)$/;
+const GH_COMMENT_MUTATION =
+  /^(?:addComment|addPullRequestReview(?:Comment|Thread|ThreadReply)?|updateIssueComment|updatePullRequestReviewComment|deletePullRequestReviewComment|submitPullRequestReview|resolveReviewThread|unresolveReviewThread|minimizeComment|unminimizeComment)$/;
+
+/**
+ * Root-level field names of a GraphQL mutation body, `[]` for a pure query, or null when
+ * the body is a mutation whose fields couldn't be read (which means CONFIRM).
+ */
+function mutationRootFields(body: string): string[] | null {
+  const kw = /\bmutation\b/.exec(body);
+  if (!kw) return [];
+  let i = body.indexOf("{", kw.index);
+  if (i === -1) return null;
+  const fields: string[] = [];
+  let depth = 0;
+  for (; i < body.length; i++) {
+    const c = body[i];
+    if (c === "{") {
+      depth++;
+      continue;
+    }
+    if (c === "}") {
+      if (--depth === 0) break;
+      continue;
+    }
+    if (depth !== 1 || !/[A-Za-z_]/.test(c)) continue;
+    let j = i;
+    while (j < body.length && /\w/.test(body[j])) j++;
+    const word = body.slice(i, j);
+    let k = j;
+    while (k < body.length && /\s/.test(body[k])) k++;
+    if (body[k] === ":") {
+      i = k; // `alias: field(…)` — the field after the colon is what runs
+      continue;
+    }
+    fields.push(word);
+    // Skip the argument list, so `input: {…}` braces don't shift the depth and its
+    // argument names don't read as sibling root fields.
+    if (body[k] === "(") {
+      let d = 0;
+      for (; k < body.length; k++) {
+        if (body[k] === "(") d++;
+        else if (body[k] === ")" && --d === 0) {
+          k++;
+          break;
+        }
+      }
+    }
+    i = k - 1;
+  }
+  return fields.length ? fields : null;
+}
+
+function ghApiVerdict(words: Word[]): Verdict | null {
+  const w = peelWrappers(words);
+  if (w[0]?.text !== "gh" || w[1]?.text !== "api") return null;
+
+  let method: string | null = null;
+  let endpoint: Word | null = null;
+  const fields: Word[] = [];
+  /** An operand the guard can't read: a live expansion, `--input`, a missing value. */
+  let opaque = false;
+
+  const rest = w.slice(2).filter((x) => !x.redirect);
+  for (let i = 0; i < rest.length; i++) {
+    const t = rest[i].text;
+    if (t === "-X" || t === "--method") {
+      const v = rest[++i];
+      if (!v || v.expands) opaque = true;
+      else method = v.text;
+      continue;
+    }
+    const ma = GH_METHOD_ASSIGN.exec(t);
+    if (ma) {
+      method = ma[1];
+      continue;
+    }
+    if (GH_FIELD_FLAG.test(t)) {
+      const v = rest[++i];
+      if (!v) opaque = true;
+      else fields.push(v);
+      continue;
+    }
+    const fa = GH_FIELD_ASSIGN.exec(t);
+    if (fa) {
+      fields.push({ ...rest[i], text: fa[1] });
+      continue;
+    }
+    if (t === "--input") {
+      opaque = true; // the body is in a file or on stdin
+      i++;
+      continue;
+    }
+    if (t.startsWith("-")) {
+      if (GH_FLAG_WITH_VALUE.test(t)) i++;
+      continue;
+    }
+    if (endpoint === null) endpoint = rest[i];
+  }
+
+  if (endpoint === null) return null; // not a usable `gh api` invocation; leave it be
+  if (endpoint.expands) return confirm("gh api call to an endpoint the guard can't read");
+
+  const path = endpoint.text.replace(/^\/+/, "").replace(/\?.*$/, "");
+
+  if (path === "graphql") {
+    if (opaque) return confirm("gh api graphql with a body the guard can't read");
+    // Every graphql request is a POST; only the operation keyword says read or write.
+    const roots: string[] = [];
+    for (const f of fields) {
+      const eq = f.text.indexOf("=");
+      const value = eq === -1 ? f.text : f.text.slice(eq + 1);
+      const name = eq === -1 ? "" : f.text.slice(0, eq);
+      if (name && name !== "query") continue; // a variable, not the document
+      if (f.expands || value.startsWith("@")) return confirm("gh api graphql with a query the guard can't read");
+      const found = mutationRootFields(value);
+      if (found === null) return confirm("gh api graphql mutation the guard can't identify");
+      roots.push(...found);
+    }
+    if (!roots.length) return ALLOW; // a query: reads only
+    return roots.every((r) => GH_COMMENT_MUTATION.test(r))
+      ? ALLOW
+      : confirm(`gh api graphql mutation (${roots.join(", ")})`);
+  }
+
+  // REST: an explicit write verb, or gh's implicit POST when fields are present.
+  const writing = method ? GH_WRITE_METHOD.test(method) : fields.length > 0 || opaque;
+  if (!writing) return ALLOW;
+  if (/^(?:POST|PATCH|PUT)$/i.test(method ?? "POST") && GH_COMMENT_ENDPOINT.test(path)) return ALLOW;
+  return confirm(`raw gh api write (${(method ?? "POST").toUpperCase()} ${path})`);
+}
+
 // ── Regex tiers ──────────────────────────────────────────────────────────────
 
 type Rule = { label: string; re: RegExp; head?: boolean };
@@ -811,12 +965,8 @@ const CONFIRM_RULES: Rule[] = [
   { label: "changes CI secrets", re: /\bgh\s+(?:secret|variable)\s+(?:set|delete|remove)\b/i },
   { label: "triggers or cancels CI", re: /\bgh\s+workflow\s+(?:run|enable|disable)\b|\bgh\s+run\s+(?:rerun|cancel)\b/i },
   { label: "changes gh auth", re: /\bgh\s+auth\s+(?:login|logout|refresh|token|setup-git)\b/i },
-  {
-    // The typed commands (gh pr create/comment/…) are free; raw api is the bypass path
-    // for everything above, so writes through it still ask.
-    label: "raw gh api write",
-    re: /\bgh\s+api\b[^\n]*(?:(?:-X|--method)[= ]\s*(?:POST|PUT|PATCH|DELETE)\b|(?:^|\s)(?:-f|-F|--field|--raw-field)\b)/i,
-  },
+  // `gh api` itself is judged per-invocation by `ghApiVerdict`: method and endpoint,
+  // not the presence of a field flag, decide whether it writes.
   { label: "archives or renames the repo", re: /\bgh\s+repo\s+(?:archive|rename)\b/i },
   { label: "mutates cluster/infra state", re: /\bkubectl\s+(?:delete|apply|drain)\b|\bterraform\s+(?:apply|destroy)\b/i },
   { label: "destroys a cloud resource", re: /\b(?:aws|gcloud|az)\b[^\n]*\b(?:delete|destroy|terminate|rm)\b/i, head: true },
@@ -989,14 +1139,16 @@ function decideBash(command: string, root: string): { verdict: Verdict; destruct
   if (rules.level === "block") return { verdict: rules, destructive: false, targets: [] };
 
   const segs = segmentize(lexed, root);
-  const pushVerdicts: Verdict[] = [];
+  const cmdVerdicts: Verdict[] = [];
   for (const seg of segs ?? []) {
-    const v = gitPushVerdict(seg.words, root);
-    if (v) pushVerdicts.push(v);
+    const push = gitPushVerdict(seg.words, root);
+    if (push) cmdVerdicts.push(push);
+    const api = ghApiVerdict(seg.words);
+    if (api) cmdVerdicts.push(api);
   }
 
   const paths = pathVerdicts(segs, root);
-  const verdict = worst([rules, ...pushVerdicts, paths.verdict, secretVerdict(command, root, segs)]);
+  const verdict = worst([rules, ...cmdVerdicts, paths.verdict, secretVerdict(command, root, segs)]);
   return { verdict, destructive: paths.destructive, targets: paths.targets };
 }
 
