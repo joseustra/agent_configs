@@ -327,9 +327,9 @@ live fleet at a glance.
 |---|---|
 | ticket filed, not dispatched | `bd create ...` → `open` |
 | dispatch line sent | `bd update <id> --status=in_progress` |
-| PR opened | `bd update <id> --notes="PR #301 open, tests green, https://..."` |
+| PR opened | `bd update <id> --notes="PR #301 open, tests green, https://github.com/joseustra/Helm/pull/301"` |
 | waiting on the human | `bd update <id> --notes="NEEDS HUMAN: hand check of ⌘⌃←/→ vs Spaces"` |
-| merged | `bd close <id> --reason="helm#300 merged (PR #301, commit 3801f23)"` |
+| merged | `bd close <id> --reason="helm#300 merged (PR #301, commit 3801f23, https://github.com/joseustra/Helm/pull/301)"` |
 | abandoned | `bd close <id> --reason="<why>"` |
 
 Never let a bead go `open` → `closed`. It passes through `in_progress`.
@@ -518,6 +518,14 @@ once, use exactly what it prints, and start every reply with it:
 
     helm-cli prompt <addr> "helm-300:1  PR #301 open, tests green"
 
+Every PR or issue you name carries its full URL in the same line. A number on
+its own is not a link and <addr> cannot open it:
+
+    helm-cli prompt <addr> "helm-300:1  PR #301 open, tests green, https://github.com/joseustra/Helm/pull/301"
+
+Read the URL, do not compose it: `gh pr view <n> --json url -q .url`,
+`gh issue view <n> --json url -q .url`, or the URL `gh pr create` printed.
+
 Keep replies to one line.
 ```
 
@@ -538,6 +546,26 @@ and no address to send to.
 The address prefix does necessary work. A reply arrives in the orchestrator pane
 as if the human typed it; without the prefix the orchestrator answers a worker
 as if it were the human.
+
+### A number is not a link
+
+`PR #301` sends the human to the worker's pane to find the URL, which is the
+one trip mission control exists to save. So the footer asks for the URL and
+**every line the orchestrator prints about a PR or an issue ends in that URL**
+— `MERGE`, `RELAY`, `STATUS`, `REFUSE`, and any prose summary of a reply.
+
+The URL is read, never composed:
+
+```fish
+gh pr view 301 --repo joseustra/Helm --json url -q .url
+gh issue view 322 --repo joseustra/Helm --json url -q .url
+gh pr list --repo joseustra/Helm --head joseustra/helm-300 --json number,url
+```
+
+**When a worker names a PR or an issue without its URL, run one of those.** A
+guessed URL is a fabricated fact even when the shape looks right, and the repo
+in the bead's `repo=` is what makes the right one readable. If the lookup fails,
+print the bare number and say the URL did not resolve.
 
 The human can supply a brief instead. Write that brief to the file, with the
 same footer.
@@ -642,7 +670,7 @@ After a merge, and only when the human asks. Order matters:
 helm-cli close $ticket          # ends the shells
 helm-cli rm $ticket             # then removes the descriptor
 grove destroy $ticket           # worktree, branch, generated files. Runs from anywhere
-bd close <id> --reason="helm#300 merged (PR #301, commit 3801f23)"
+bd close <id> --reason="helm#300 merged (PR #301, commit 3801f23, https://github.com/joseustra/Helm/pull/301)"
 ```
 
 `close` before `rm`: after `rm` there is still a name to close but no descriptor
@@ -730,12 +758,14 @@ DISPATCH  helm-300  brief sent  workspace helm-300  bead bd_00_mission_control-4
 
 STATUS
   helm-300     PR #301 open   2 commits  last 14m ago  CI pass   claude working
+               https://github.com/joseustra/Helm/pull/301
   helm-296     no commits     no PR      no agent      NEEDS HUMAN: keypress check
   completo-61  no workspace   claude idle
 
 RELAY  helm-300  merge PR #301  reply requested at 00_MissionControl:2
+       https://github.com/joseustra/Helm/pull/301
 
-MERGE  helm-300  PR #301 → main, commit 3801f23
+MERGE  helm-300  PR #301 → main, commit 3801f23  https://github.com/joseustra/Helm/pull/301
 
 RETIRE helm-300  session closed, descriptor removed, workspace and branch destroyed
 
@@ -743,6 +773,11 @@ REFUSE  I do not edit files.  dispatch helm-254?
 ```
 
 One fact per column. Active voice. Present tense. One word for one thing.
+
+**A PR or an issue named anywhere in the output carries its URL** — on the same
+line where it fits, on a continuation line under the row where it does not. The
+human clicks from mission control and never opens the worker's pane to find a
+link.
 
 **Every column is derived.** `2 commits` from `git rev-list --count
 origin/HEAD..HEAD`, `last 14m ago` from `git log -1 --format=%cr`, the PR from
