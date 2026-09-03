@@ -57,6 +57,24 @@ make doctor      # verify no secret/per-host file is tracked; list missing seeds
 
 `make install` is idempotent — re-run it after editing the manifest or moving the repo.
 
+## omp context gauge
+
+`omp/agent/extensions/omp-context-gauge.ts` draws the context window as raw tokens —
+`47K/1M █████░░░░░░░░░░░` — on a row below the editor, and `config.yml` sets
+`statusLine.contextLine: percentage` with a custom preset (omp's `default` minus
+`context_pct`/`context_total`) so the bar keeps its usage-colored line but no longer
+prints `9%` / `1M`.
+
+It is a separate row because the status line is closed to extensions: the gauge label is
+hardcoded in `formatEmbeddedContextPercent`
+(`packages/coding-agent/src/modes/components/status-line/component.ts` upstream), the
+segment registry is internal, and the extension UI only offers `setStatus` (rows under
+the bar), `setWidget` (a component above/below the editor) and `setEditorComponent`.
+Colors mirror omp's own `getContextUsageLevel` thresholds — a level trips on a
+percentage *or* an absolute token count, whichever comes first, so a 1M window warns on
+absolute burn well before 50%. The widget appears once the session initializes, not on
+the pre-session welcome screen.
+
 ## Secrets & per-host files
 
 Never committed: `auth.json` (written by the tools at login), `models.json` /

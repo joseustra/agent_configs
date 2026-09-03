@@ -1,13 +1,12 @@
 tools: 
   approvalMode: yolo
-  discoveryMode: all
-setupVersion: 1
+setupVersion: 2
 modelRoles: 
   plan: anthropic/claude-opus-4-8
   slow: anthropic/claude-opus-4-8
   task: anthropic/claude-sonnet-4-6
   smol: anthropic/claude-haiku-4-5
-  default: anthropic/claude-opus-4-8:medium
+  default: anthropic/claude-opus-5:medium
 disabledProviders: 
   - gemini
   - github
@@ -16,3 +15,22 @@ disabledProviders:
 theme: 
   light: light
   dark: titanium
+composer: 
+  shape: box
+# The context readout comes from omp/agent/extensions/omp-context-gauge.ts (raw
+# tokens), so the bar must not print a percentage: `contextLine: percentage`
+# keeps the usage-colored line but drops the embedded `9%`/`1M` labels, and the
+# custom preset is omp's `default` minus `context_pct`/`context_total`. The
+# custom preset ships empty segmentOptions, so default's are spelled out here.
+statusLine: 
+  preset: custom
+  contextLine: percentage
+  leftSegments: [pi, model, mode, collab, path, git, pr, cost]
+  rightSegments: [session_name]
+  separator: powerline-thin
+  segmentOptions: 
+    model: { showThinkingLevel: true }
+    path: { abbreviate: true, maxLength: 40, stripWorkPrefix: true }
+    git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true }
+dev: 
+  autoqaConsent: denied
