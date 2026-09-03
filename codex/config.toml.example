@@ -1,0 +1,16 @@
+# Personal Codex defaults. `make install` copies this to ~/.codex/config.toml
+# only when no config exists; after that, each machine owns its copy.
+
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+web_search = "cached"
+personality = "pragmatic"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 4
+# Keep mechanical/background work inexpensive. Individual agents may override
+# these values in ~/.codex/agents/*.toml when they need deeper reasoning.
+default_subagent_model = "gpt-5.6-terra"
+default_subagent_reasoning_effort = "low"
+

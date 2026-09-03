@@ -18,6 +18,18 @@ link  claude/statusline.mjs                       .claude/statusline.mjs
 linkkids  claude/skills                           .claude/skills
 linkkids  claude/agents                           .claude/agents
 linkkids  claude/commands                         .claude/commands
+# Codex uses AGENTS.md for global guidance and standalone TOML custom agents.
+# Link only the Claude skills that pass Codex validation unchanged. Claude-only
+# frontmatter means the remaining skills need an intentional conversion first.
+link  codex/AGENTS.md                             .codex/AGENTS.md
+linkkids  codex/agents                            .codex/agents
+link  claude/skills/codebase-design               .agents/skills/codebase-design
+link  claude/skills/domain-modeling               .agents/skills/domain-modeling
+link  claude/skills/final-code-review             .agents/skills/final-code-review
+link  claude/skills/orchestrator                  .agents/skills/orchestrator
+link  claude/skills/prototype                     .agents/skills/prototype
+link  claude/skills/research                      .agents/skills/research
+link  claude/skills/tdd                           .agents/skills/tdd
 link  omp/agent/config.yml                        .omp/agent/config.yml
 link  omp/agent/extensions/omp-danger-guard.ts    .omp/agent/extensions/omp-danger-guard.ts
 # Second link to the SAME guard, at the path the devcontainer Makefile realpaths and
@@ -39,6 +51,7 @@ link  pi-devcontainer/settings.json               .pi-devcontainer/settings.json
 # ── per-host / secret (seeded from template, never committed) ───────────────────
 # settings.json drifts per machine (model, plugins, effort) — seed once, own locally.
 seed  claude/settings.json.example                .claude/settings.json               644
+seed  codex/config.toml.example                   .codex/config.toml                  644
 seed  omp/agent/.env.example                      .omp/agent/.env                     600
 seed  omp/agent/models.yml.example                .omp/agent/models.yml               644
 seed  pi-devcontainer/models.json.example         .pi-devcontainer/models.json        600

@@ -1,7 +1,7 @@
 # agent_configs
 
-One repo for the configs of every coding agent I use — Claude Code, oh-my-pi (omp),
-and OpenCode — instead of a scatter of dotfolders, some in git and some not. A `Makefile`
+One repo for the configs of every coding agent I use — Claude Code, Codex,
+oh-my-pi (omp), and OpenCode — instead of a scatter of dotfolders, some in git and some not. A `Makefile`
 **symlinks** the shared config into each tool's real location and **seeds** the per-host /
 secret files from templates.
 
@@ -9,6 +9,8 @@ secret files from templates.
 
 ```
 claude/            -> ~/.claude/         (CLAUDE.md, statusline.mjs, skills/, agents/, commands/; settings.json.example seed)
+codex/             -> ~/.codex/          (AGENTS.md, agents/; config.toml.example seed)
+claude/skills/*    -> ~/.agents/skills/  (selected Codex-compatible skills, linked individually)
 omp/               -> ~/.omp/            (agent/config.yml, agent/commands/, agent/agents/, agent/extensions/omp-danger-guard.ts; .env.example seed)
 opencode/          -> ~/.config/opencode (opencode.json)
 pi-devcontainer/   -> ~/.pi-devcontainer (settings.json; per-host model overlays)
@@ -38,13 +40,23 @@ Three kinds of entries in `manifest`:
 
 ## Per-machine customization
 
-- **Skills / agents / commands**: create them directly in `~/.claude/skills/<name>`,
+- **Claude skills / agents / commands**: create them directly in `~/.claude/skills/<name>`,
   `~/.claude/agents/<name>.md`, `~/.claude/commands/<name>.md`.
   Plain files and dirs there are local to the machine; symlinks are the shared base from
   this repo. To promote a local skill into the shared base: move it into `claude/skills/`
   here, commit, and re-run `make install` (it becomes a symlink in place).
 - **Claude Code settings**: `~/.claude/settings.json` is yours per machine (seeded once
   from `claude/settings.json.example`). Deliberate shared changes go into the `.example`.
+- **Codex skills**: selected skills that validate unchanged for both tools are linked
+  individually from `claude/skills/` into `~/.agents/skills/`. The initial set is
+  `codebase-design`, `domain-modeling`, `final-code-review`, `orchestrator`,
+  `prototype`, `research`, and `tdd`. A Codex-only, machine-local skill can live
+  directly under `~/.agents/skills/<name>`.
+- **Codex custom agents**: shared agents live in `codex/agents/` and are linked into
+  `~/.codex/agents/`; machine-local agents can live beside them as real `.toml` files.
+- **Codex settings**: `~/.codex/config.toml` is seeded once from
+  `codex/config.toml.example` and then owned by that machine. Global working guidance
+  is symlinked from `codex/AGENTS.md`.
 
 ## Usage
 
@@ -82,7 +94,7 @@ Never committed: `auth.json` (written by the tools at login), `models.json` /
 `~/.omp/agent/.env` may carry an API key), anything `*.key` / `*.pem`.
 `.gitignore` enforces this and `make doctor` is the backstop. On a fresh machine,
 `make install` seeds these from the `.example` templates — fill in the real values, then
-`pi login` / `claude login` etc. for auth.
+`pi login` / `claude login` / `codex login` etc. for auth.
 
 ## New machine
 
